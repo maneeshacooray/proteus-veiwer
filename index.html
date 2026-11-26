@@ -3,8 +3,30 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Proteus Viewer</title>
+    <title>Proteus Viewer – Open .pdsprj, Schematic &amp; PCB Files Online</title>
+    <meta name="description" content="Free online Proteus viewer: open .pdsprj projects, schematics and Gerber PCB files in your browser. See the schematic, PCB top and bottom, layers and parts list without installing Proteus. Nothing is uploaded." />
+    <meta name="keywords" content="Proteus viewer, pdsprj viewer, open pdsprj online, Proteus Design Suite, ISIS schematic viewer, ARES PCB viewer, Gerber viewer, PCB viewer online, schematic viewer, Labcenter Proteus" />
+    <meta name="author" content="Maneesha Cooray" />
+    <meta name="theme-color" content="#1e3a8a" />
+    <link rel="canonical" href="https://maneeshacooray.github.io/proteus-veiwer/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Proteus Viewer" />
+    <meta property="og:title" content="Proteus Viewer – view .pdsprj schematics and PCBs online" />
+    <meta property="og:description" content="Free online Proteus viewer: open .pdsprj projects, schematics and Gerber PCB files in your browser. See the schematic, PCB top and bottom, layers and parts list without installing Proteus. Nothing is uploaded." />
+    <meta property="og:url" content="https://maneeshacooray.github.io/proteus-veiwer/" />
+    <meta property="og:image" content="https://maneeshacooray.github.io/proteus-veiwer/og.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Proteus Viewer – view .pdsprj schematics and PCBs online" />
+    <meta name="twitter:description" content="Free online Proteus viewer: open .pdsprj projects, schematics and Gerber PCB files in your browser. See the schematic, PCB top and bottom, layers and parts list without installing Proteus. Nothing is uploaded." />
+    <meta name="twitter:image" content="https://maneeshacooray.github.io/proteus-veiwer/og.png" />
+    <script type="application/ld+json">
+      {"@context":"https://schema.org","@type":"WebApplication","name":"Proteus Viewer","url":"https://maneeshacooray.github.io/proteus-veiwer/",
+       "description":"Free online Proteus viewer: open .pdsprj projects, schematics and Gerber PCB files in your browser. See the schematic, PCB top and bottom, layers and parts list without installing Proteus. Nothing is uploaded.","applicationCategory":"DesignApplication","operatingSystem":"Any (web browser)",
+       "offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},
+       "codeRepository":"https://github.com/maneeshacooray/proteus-veiwer"}
+    </script>
     <link rel="icon" type="image/svg+xml" href="./logo.svg" />
+    <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
@@ -38,14 +60,17 @@
 
       <div id="empty">
         <div class="drop-card">
-          <h2>Drop your Proteus exports here</h2>
-          <p>A <b>.zip</b> or loose files, in any combination:</p>
+          <h1>View Proteus schematics and PCBs in your browser</h1>
+          <p>Drop files here or use <b>Open files</b>. Loose files or a <b>.zip</b>, in any combination:</p>
           <ul>
-            <li><b>Proteus project</b>: .pdsprj<br /><small>Shows project info, parts list and board layers</small></li>
-            <li><b>Schematic</b>: PDF, SVG or PNG<br /><small>Proteus schematic → File → Print / Export Graphics</small></li>
-            <li><b>PCB</b>: Gerber + drill files<br /><small>Proteus PCB Layout → Output → Generate Gerber/Excellon Files</small></li>
+            <li><b>Proteus project (.pdsprj)</b><br /><small>Draws the schematic, PCB top and bottom, and the parts list. No export needed.</small></li>
+            <li><b>Schematic: PDF, SVG or PNG</b><br /><small>In Proteus: File → Print to PDF, or File → Export Graphics</small></li>
+            <li><b>PCB: Gerber and drill files</b><br /><small>In Proteus: Output → Generate Gerber/Excellon Files</small></li>
           </ul>
-          <p class="hint">Files stay on your computer. Nothing is uploaded.</p>
+          <p><button id="try-demo" type="button">Try a demo board</button></p>
+          <p class="hint">Files stay on your computer. Nothing is uploaded. Keys 1–5 switch tabs, scroll to zoom, drag to pan.</p>
+          <p class="hint">Reading .pdsprj files relies on a reverse-engineered format, so details can differ from Proteus. Exports render exactly.
+            <a href="https://github.com/maneeshacooray/proteus-veiwer" target="_blank" rel="noopener">Source &amp; issues on GitHub</a></p>
         </div>
       </div>
 

@@ -66,13 +66,17 @@ header {
 #layer-list .kind { color: var(--muted); font-size: 11px; }
 #layer-list input[type=color] { width: 22px; height: 22px; border: 0; padding: 0; background: none; cursor: pointer; }
 
-#empty { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; }
+#empty { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; z-index: 1; }
+#empty .drop-card a, #try-demo { pointer-events: auto; }
 #empty[hidden] { display: none; }
 .drop-card {
   max-width: 440px; padding: 28px 32px; border: 2px dashed var(--line); border-radius: 14px;
   background: var(--panel);
 }
-.drop-card h2 { margin-top: 0; font-size: 18px; }
+.drop-card h1 { margin-top: 0; font-size: 18px; }
+.drop-card a { color: #93c5fd; }
+#try-demo { background: #2563eb; color: #fff; border: 0; border-radius: 6px; padding: 8px 14px; font: inherit; cursor: pointer; }
+#try-demo:hover { background: #1d4ed8; }
 .drop-card li { margin-bottom: 10px; }
 .drop-card small, .hint { color: var(--muted); }
 

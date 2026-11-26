@@ -31,6 +31,15 @@ let currentView = 'schematic'
 /* ---------------- file intake ---------------- */
 
 $('#file-input').addEventListener('change', (e) => openFiles([...e.target.files]))
+$('#try-demo')?.addEventListener('click', async () => {
+  try {
+    const res = await fetch('./demo.zip')
+    if (!res.ok) throw new Error(res.statusText)
+    openFiles([new File([await res.blob()], 'demo.zip', { type: 'application/zip' })])
+  } catch (e) {
+    setStatus(`Could not load the demo (${e.message})`, true)
+  }
+})
 
 stage.addEventListener('dragover', (e) => { e.preventDefault(); stage.classList.add('dragover') })
 stage.addEventListener('dragleave', (e) => {

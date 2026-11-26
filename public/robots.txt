@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://maneeshacooray.github.io/proteus-veiwer/sitemap.xml
