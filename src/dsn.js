@@ -256,7 +256,7 @@ function rotOf(v) {
   return a
 }
 
-function trailingString(d, from, end) {
+export function trailingString(d, from, end) {
   // last NUL-terminated printable run in [from, end)
   let e = end - 1
   while (e > from && d[e] === 0) e--
