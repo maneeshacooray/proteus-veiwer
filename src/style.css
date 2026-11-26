@@ -17,7 +17,8 @@ header {
   display: flex; align-items: center; gap: 16px;
   padding: 8px 14px; background: var(--panel); border-bottom: 1px solid var(--line);
 }
-.brand { font-weight: 600; letter-spacing: .02em; }
+.brand { font-weight: 600; letter-spacing: .02em; display: inline-flex; align-items: center; gap: 8px; }
+.brand img { border-radius: 5px; }
 #tabs { display: flex; gap: 4px; flex: 1; }
 #tabs button, #zoom-controls button, .open-btn {
   background: transparent; color: var(--muted); border: 1px solid transparent;
