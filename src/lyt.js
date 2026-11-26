@@ -9,7 +9,10 @@
 //     (same record layout as ISIS), then pads: 8 flag bytes, x, y, 16 bytes,
 //     8-byte pin number, pad-style name\0.
 //   Board: placements [x][y][i16 rotation (0.1°), u16 flags (bit 0 = bottom side)][u32 index][pstr footprint],
-//     tracks [pstr net][u32 segments n][layer][…23 bytes…][n+1 points] ff ff ff ff,
+//     tracks [pstr net][u32 segments n][layer][trace-style index][…variable…][n+1 points] ff ff ff ff
+//       (trace styles are the ";TS" text table; the header length varies, so points are found from the terminator),
+//     vias [u32][ff ff 00 80][u8 index into the pad/via style table][00][u8][x][y],
+//     free pads: like a placement but naming a pad style instead of a footprint,
 //     board outline as a graphics box/lines outside any footprint.
 
 const dec = new TextDecoder('windows-1252')
@@ -41,13 +44,37 @@ export function parseLyt(bytes) {
     if (base && !padStyles.has(m[1])) padStyles.set(m[1], { ...base, hole: units(m[2]) || base.hole })
   }
 
+  // every pad/via/stack style in table order: vias refer to their style by this index
+  const styleList = []
+  {
+    const seen = new Set()
+    for (const m of text.matchAll(/(?:^|[\n\0])([^,\n\0]+),([A-Z]+PAD|[A-Z]+VIA|STACK),([^,\n]*),([^,\n]*),([^,\n]*)/g)) {
+      if (seen.has(m[1])) continue
+      seen.add(m[1])
+      styleList.push({ name: m[1], kind: m[2], w: units(m[3]), h: units(m[4]), hole: units(m[5]) })
+    }
+  }
+
+  // trace styles, in table order: tracks refer to them by index ("\n;TS\nDEFAULT,20th\nBRIDGE,25th\n…")
+  const traceStyles = []
+  const ts = text.indexOf('\n;TS\n')
+  if (ts >= 0) {
+    for (const line of text.slice(ts + 5, ts + 20000).split('\n')) {
+      const m = /^([^,;*\0]+),([^,]+)$/.exec(line)
+      if (!m) break
+      traceStyles.push({ name: m[1], w: units(m[2]) })
+    }
+  }
+
   /* ---------- graphics records (shared layout with ISIS) ---------- */
 
   function readRecord(o, end) {
     if (o + 16 > end) return null
     const len = u32(o), len2 = u32(o + 4), type = d[o + 8]
-    if (len < 40 || len > 4096 || len2 > len || o + len > end || d[o + 9] !== 2 || type > 15) return null
+    if (len < 40 || len > 4096 || o + len > end || d[o + 9] !== 2 || type > 15) return null
+    // markers ($MKRORIGIN, $MKRREFERENCE…) can carry len2 > len
     if (type === 6 || type === 8) return { type, len }
+    if (len2 > len) return null
     let p = o + 10, nameStart = -1
     for (; p < o + len - 2; p++) {
       if (d[p] === 0x02 && (d[p + 1] & 0x40) && isPrint(d[p + 2])) { nameStart = p + 2; break }
@@ -63,6 +90,12 @@ export function parseLyt(bytes) {
     else if (type === 1) { rec.x = i32(body); rec.y = i32(body + 4); rec.w = i32(body + 12); rec.h = i32(body + 16) }
     else if (type === 2) { rec.cx = i32(body); rec.cy = i32(body + 4); rec.r = i32(body + 8) }
     else if (type === 3) rec.points = pts(4)
+    else if (type === 7) { // path, see dsn.js
+      const n = u32(body)
+      if (n < 2 || n > 2000 || body + 22 + 10 * n > o + len) return { type: -1, len }
+      rec.points = Array.from({ length: n }, (_, k) => [i32(body + 22 + 8 * k), i32(body + 26 + 8 * k)])
+      rec.kinds = Array.from({ length: n }, (_, k) => d[body + 22 + 8 * n + 2 * k])
+    }
     return rec
   }
 
@@ -128,37 +161,82 @@ export function parseLyt(bytes) {
 
   const placements = []
   const tracks = []
+  const vias = []
+  const freePads = []
   const labels = []
   let outline = null
 
   for (let p = 0x200; p < d.length - 24; p++) {
     const L = d[p]
-    if (L >= 2 && L <= 40 && p >= 16) {
+    if (L <= 40 && p >= 16) {
       const name = tryStr(d, p + 1, L)
-      if (name && footprints.has(name) && !libAt.has(p)) {
+      if (L >= 2 && name && footprints.has(name) && !libAt.has(p)) {
         const x = i32(p - 16), y = i32(p - 12), rotRaw = u32(p - 8)
         const ang = (rotRaw << 16) >> 16 // signed tenths of a degree (−900 = −90°)
         if (Math.abs(x) < 50 * UNITS_PER_INCH && Math.abs(y) < 50 * UNITS_PER_INCH && Math.abs(ang) <= 3600 && (rotRaw >>> 17) === 0) {
           const ref = readLabelAfter(p + 1 + L)
           placements.push({ footprint: name, x, y, rot: (((ang / 10) % 360) + 360) % 360, bottom: !!(rotRaw & 0x10000), ref })
         }
+      } else if (L >= 2 && name && padStyles.has(name) && !libAt.has(p)) {
+        // a pad placed on its own (mounting hole, test point): same layout as a placement,
+        // with a pad-style name where the footprint name would be
+        const x = i32(p - 16), y = i32(p - 12), rotRaw = u32(p - 8)
+        const ang = (rotRaw << 16) >> 16
+        if (Math.abs(x) < 50 * UNITS_PER_INCH && Math.abs(y) < 50 * UNITS_PER_INCH && (x || y) && Math.abs(ang) <= 3600 && (rotRaw >>> 17) === 0 && u32(p - 4) < 100000) {
+          freePads.push({ style: name, x, y, rot: (((ang / 10) % 360) + 360) % 360 })
+        }
       }
-      // track: [pstr net][u32 n][23 bytes][n+1 points] ffffffff
-      if (name && /^[\x21-\x7e]+$/.test(name)) {
+      // track: [pstr net (may be empty)][u32 n][layer][style][…][n+1 points] ffffffff
+      if (name !== null && (L === 0 || /^[\x21-\x7e]+$/.test(name))) {
         const o = p + 1 + L
         const n = u32(o)
         const layer = d[o + 4]
-        if (n >= 1 && n < 1000 && (layer === TOP_COPPER || layer === BOTTOM_COPPER || layer < 15)) {
-          const end = o + 27 + 8 * (n + 1)
-          if (end + 4 <= d.length && u32(end) === 0xffffffff) {
+        // header length varies between Proteus versions; the n+1 points always end in ffffffff,
+        // so find the start that puts the terminator exactly after them
+        const styleOk = !traceStyles.length || d[o + 5] < traceStyles.length
+        // only outer copper for now; records on inner layer ids are not tracks on these 2-layer boards
+        if (n >= 1 && n < 1000 && (layer === TOP_COPPER || layer === BOTTOM_COPPER) && styleOk) {
+          let ps = -1
+          for (let q = o + 18; q <= o + 40; q++) {
+            const e = q + 8 * (n + 1)
+            if (e + 4 > d.length || u32(e) !== 0xffffffff) continue
+            // The terminator is 4 or (newer files) 8 bytes of ff, and a negative last y also ends in
+            // ff, so measure the whole ff run: what is left over beyond the terminator belongs to y.
+            let run = 0
+            while (e + run < d.length && d[e + run] === 0xff) run++
+            const term = run >= 8 ? 8 : 4
+            q += run - term
+            ps = q
+            break
+          }
+          if (ps > 0) {
+            const end = ps + 8 * (n + 1)
             const pts = []
-            for (let k = 0; k <= n; k++) pts.push([i32(o + 27 + 8 * k), i32(o + 31 + 8 * k)])
-            if (pts.every(([a, b]) => Math.abs(a) < 50 * UNITS_PER_INCH && Math.abs(b) < 50 * UNITS_PER_INCH)) {
-              tracks.push({ net: name, layer, width: (d[o + 5] || 10) * 2540, points: pts })
+            for (let k = 0; k <= n; k++) pts.push([i32(ps + 8 * k), i32(ps + 4 + 8 * k)])
+            // real tracks: in range, never at the exact origin, no repeated consecutive points
+            const sane = pts.every(([a, b], k) => Math.abs(a) < 50 * UNITS_PER_INCH && Math.abs(b) < 50 * UNITS_PER_INCH &&
+              !(Math.abs(a) < 2540 && Math.abs(b) < 2540) && (k === 0 || a !== pts[k - 1][0] || b !== pts[k - 1][1]))
+            if (sane) {
+              // two equal int32s in the header
+              const raw = Array.from(d.subarray(o + 5, ps))
+              const width = traceStyles[d[o + 5]]?.w || 10 * 2540
+              tracks.push({ net: name, layer, width, style: traceStyles[d[o + 5]]?.name, raw, points: pts })
               p = end + 3
               continue
             }
           }
+        }
+      }
+    }
+    // via: [u32][ff ff 00 80][u8 style index → a *VIA style][00][u8 flags][x][y]
+    if (d[p] === 0xff && d[p + 1] === 0xff && d[p + 2] === 0x00 && d[p + 3] === 0x80 && d[p + 5] === 0 && p + 15 < d.length) {
+      const st = styleList[d[p + 4]]
+      if (st && /VIA$/.test(st.kind)) {
+        const x = i32(p + 7), y = i32(p + 11)
+        if (Math.abs(x) < 50 * UNITS_PER_INCH && Math.abs(y) < 50 * UNITS_PER_INCH) {
+          vias.push({ x, y, d: st.w, hole: st.hole, style: st.name })
+          p += 14
+          continue
         }
       }
     }
@@ -169,7 +247,7 @@ export function parseLyt(bytes) {
     }
   }
 
-  return { padStyles, footprints, placements, tracks, outline, labels }
+  return { padStyles, traceStyles, footprints, placements, freePads, tracks, vias, outline, labels }
 
   function readLabelAfter(o) {
     // "ff <pstr text> x y … Vector Font\0PART REFERENCE"

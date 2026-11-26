@@ -22,7 +22,9 @@ Drag files onto the page. Keys `1`–`5` switch tabs; scroll to zoom, drag to pa
 npm install
 npm run dev      # local server
 npm run build    # single self-contained dist/index.html
-npm run verify -- a.pdsprj b.pdsprj [--svg outdir]   # check parser against real projects
+npm run verify -- a.pdsprj b.pdsprj [--svg outdir]   # parser self-checks
+node tools/compare-gerber.mjs a.pdsprj gerberDir      # compare with Proteus's Gerbers
+node tools/compare-pdf.mjs a.pdsprj schematic.pdf     # compare with Proteus's schematic PDF
 ```
 
 Pushing to `main` deploys to GitHub Pages.
@@ -31,9 +33,18 @@ Pushing to `main` deploys to GitHub Pages.
 
 A `.pdsprj` is a ZIP holding `ROOT.DSN` (schematic), `ROOT.LYT` (layout), `ROOT.CDB` (parts) and `PROJECT.XML`. The binary layouts are documented at the top of [`src/dsn.js`](src/dsn.js) and [`src/lyt.js`](src/lyt.js).
 
-Verified against 12 public GitHub projects plus a private sample: 93–100% of wire ends and 100% of track ends on routed boards connect correctly.
+Checked against Proteus's own exports from 15 public GitHub boards (`tools/compare-gerber.mjs`, `tools/compare-pdf.mjs`):
 
-**Not yet supported:** vias, copper pours, board-edge layer (the outline is estimated), bottom silk text. Exported PDFs/Gerbers take precedence when dropped alongside a `.pdsprj`.
+| | Matches Proteus |
+|---|---|
+| Pads (position) / drill holes | 95–100% on 12 of 13 boards |
+| Track width | 99–100% |
+| Parsed tracks that are real copper | 97–100% |
+| Part references on the schematic PDF | 86–100% |
+
+Two boards whose Gerbers predate later edits were excluded.
+
+**Not yet supported:** copper pours/zones, the board-edge layer (the outline is estimated), inner layers, bottom silk text. Exported PDFs/Gerbers take precedence when dropped alongside a `.pdsprj`.
 
 ## Tech
 

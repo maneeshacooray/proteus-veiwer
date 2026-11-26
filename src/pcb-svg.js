@@ -1,5 +1,6 @@
 // Draws a parsed Proteus PCB layout (see lyt.js) as SVG, viewed from the top or the bottom.
 import { placeTransform, UNITS_PER_INCH } from './lyt.js'
+import { pathData } from './dsn.js'
 
 const PX_PER_INCH = 300
 const COLORS = {
@@ -22,7 +23,7 @@ export function pcbToSvg(pcb, { side = 'top' } = {}) {
 
   for (const t of pcb.tracks) {
     const pts = t.points.map(([x, y]) => (grow(x, y), `${f(x)},${f(-y)}`)).join(' ')
-    const target = t.layer === 0 ? els.top : els.bottom
+    const target = t.layer === 0 ? els.top : els.bottom // parser keeps only top (0) and bottom (15)
     target.push(`<polyline points="${pts}" fill="none" stroke-width="${f(Math.max(t.width, 2540 * 6))}" stroke-linecap="round" stroke-linejoin="round"><title>${esc(t.net)}</title></polyline>`)
   }
 
@@ -47,6 +48,10 @@ export function pcbToSvg(pcb, { side = 'top' } = {}) {
       } else if (g.type === 3) {
         const [a, b, c, e] = g.points.map(T)
         silk.push(`<path d="M${f(a[0])},${f(-a[1])} C${f(b[0])},${f(-b[1])} ${f(c[0])},${f(-c[1])} ${f(e[0])},${f(-e[1])}" fill="none" stroke-width="${sw}"/>`)
+      } else if (g.type === 7 && g.points) {
+        const pts = g.points.map(T)
+        silk.push(`<path d="${pathData(pts, g.kinds, f)}" fill="none" stroke-width="${sw}"/>`)
+        pts.forEach((p) => grow(...p))
       }
     }
     const fallback = fp.pads.find((p) => pcb.padStyles.get(p.style)?.w)?.style
@@ -73,6 +78,24 @@ export function pcbToSvg(pcb, { side = 'top' } = {}) {
       const [x, y] = [pl.ref.x, pl.ref.y]
       els.silk.push(`<text x="${f(x)}" y="${f(-y)}" font-size="${f(0.05 * UNITS_PER_INCH)}" fill="${COLORS.silk}" stroke="none">${esc(pl.ref.text)}</text>`)
     }
+  }
+
+  for (const fp of pcb.freePads || []) {
+    const st = pcb.padStyles.get(fp.style)
+    if (!st) continue
+    const quarter = Math.round(fp.rot / 90) % 2 === 1
+    const w = quarter ? st.h : st.w, h = quarter ? st.w : st.h
+    grow(fp.x, fp.y, Math.max(w, h) / 2)
+    const sq = /^S|SPAD|RSMPAD|SQ/.test(st.kind)
+    els.pads.push(sq || w !== h
+      ? `<rect x="${f(fp.x - w / 2)}" y="${f(-fp.y - h / 2)}" width="${f(w)}" height="${f(h)}"${sq ? '' : ` rx="${f(Math.min(w, h) / 2)}"`}><title>pad ${esc(fp.style)}</title></rect>`
+      : `<circle cx="${f(fp.x)}" cy="${f(-fp.y)}" r="${f(w / 2)}"><title>pad ${esc(fp.style)}</title></circle>`)
+    if (st.hole) els.pads.push(`<circle cx="${f(fp.x)}" cy="${f(-fp.y)}" r="${f(st.hole / 2)}" fill="${COLORS.hole}"/>`)
+  }
+  for (const v of pcb.vias || []) {
+    grow(v.x, v.y, v.d / 2)
+    els.pads.push(`<circle cx="${f(v.x)}" cy="${f(-v.y)}" r="${f(v.d / 2)}"><title>via</title></circle>`)
+    if (v.hole) els.pads.push(`<circle cx="${f(v.x)}" cy="${f(-v.y)}" r="${f(v.hole / 2)}" fill="${COLORS.hole}"/>`)
   }
 
   // Board shape: the drawn outline when it really encloses the parts, else the parts' extent.

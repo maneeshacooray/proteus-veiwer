@@ -1,11 +1,36 @@
 // Draws a parsed ISIS schematic (see dsn.js) as SVG.
-import { transform, orientVec, UNITS_PER_INCH } from './dsn.js'
+import { transform, orientVec, pathData, UNITS_PER_INCH } from './dsn.js'
 
 const PX_PER_INCH = 150 // CSS pixels per schematic inch at zoom 1
 const k = PX_PER_INCH / UNITS_PER_INCH
 const MIN_STROKE = 0.006 * UNITS_PER_INCH
 
+// Multi-sheet designs: each sheet is drawn on its own and the sheets are stacked top to bottom.
 export function schematicToSvg(sch) {
+  const ids = [...new Set([...sch.parts, ...sch.wires, ...sch.terminals, ...sch.labels].map((o) => o.sheet || 0))].sort((a, b) => a - b)
+  if (ids.length <= 1) return sheetToSvg(sch)
+  const gap = 0.6 * UNITS_PER_INCH
+  const sheets = ids.map((id) => {
+    const of = (list) => list.filter((o) => (o.sheet || 0) === id)
+    const svg = sheetToSvg({ ...sch, parts: of(sch.parts), wires: of(sch.wires), terminals: of(sch.terminals), labels: of(sch.labels) })
+    const vb = /viewBox="([^"]+)"/.exec(svg)[1].split(' ').map(Number) // mils
+    return { vb, inner: svg.slice(svg.indexOf('>') + 1, svg.lastIndexOf('</svg>')) }
+  })
+  const width = Math.max(...sheets.map((s) => s.vb[2]))
+  let y = 0
+  const body = sheets.map((s, i) => {
+    const title = `<text x="0" y="${f(-0.12 * UNITS_PER_INCH)}" font-size="${f(0.16 * UNITS_PER_INCH)}" fill="#7a7a6a">Sheet ${i + 1} of ${sheets.length}</text>`
+    const g = `<g transform="translate(${-s.vb[0]},${y - s.vb[1] + f(0.3 * UNITS_PER_INCH)})">${s.inner}</g><g transform="translate(0,${y + f(0.3 * UNITS_PER_INCH)})">${title}</g>`
+    y += s.vb[3] + f(0.3 * UNITS_PER_INCH) + f(gap)
+    return g
+  })
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${y}" width="${(width * 2540 * k).toFixed(0)}" height="${(y * 2540 * k).toFixed(0)}" font-family="Arial, Helvetica, sans-serif">
+<rect width="${width}" height="${y}" fill="#e9e9df"/>
+${body.join('\n')}
+</svg>`
+}
+
+function sheetToSvg(sch) {
   const out = []
   const box = bbox()
 
@@ -81,6 +106,10 @@ ${out.join('\n')}
         const [a, b, c, e] = g.points.map(T)
         out.push(`<path d="M${f(a[0])},${f(-a[1])} C${f(b[0])},${f(-b[1])} ${f(c[0])},${f(-c[1])} ${f(e[0])},${f(-e[1])}" fill="none" ${common}/>`)
         grow(...a); grow(...e)
+      } else if (g.type === 7) {
+        const pts = g.points.map(T)
+        out.push(`<path d="${pathData(pts, g.kinds, f)}" fill="${fill}" ${common}/>`)
+        pts.forEach((p) => grow(...p))
       } else if (g.type === 4 && g.text) {
         const [x, y] = T([g.x, g.y])
         text(g.text, x, y, g.size || 0.08 * UNITS_PER_INCH, g.just, rot, stroke)

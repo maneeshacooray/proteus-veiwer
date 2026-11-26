@@ -87,6 +87,8 @@ for (const file of args) {
         if (!fp) { missingFp++; continue }
         for (const p of fp.pads) pads.push(placeTransform([p.x, p.y], pl))
       }
+      for (const v of b.vias || []) pads.push([v.x, v.y])
+      for (const fp of b.freePads || []) pads.push([fp.x, fp.y])
       const near = (a, list, tol) => list.some((q) => Math.hypot(a[0] - q[0], a[1] - q[1]) <= tol)
       const tsegs = b.tracks.flatMap((t) => t.points.slice(1).map((q, i) => [t.points[i], q]))
       let ends = 0, onPad = 0, onTrack = 0
@@ -100,7 +102,7 @@ for (const file of args) {
       Object.assign(report, {
         footprints: b.footprints.size, placements: b.placements.length, missingFp,
         tracks: b.tracks.length, layers: [...new Set(b.tracks.map((t) => t.layer))].join('/'),
-        trackEndsOnPad: pct(onPad, ends), trackEndsOnTrack: onTrack, outline: b.outline ? 'yes' : 'no',
+        trackEndsOnPad: pct(onPad, ends), vias: (b.vias || []).length, trackEndsOnTrack: onTrack, outline: b.outline ? 'yes' : 'no',
       })
       if (svgDir && b.placements.length) fs.writeFileSync(path.join(svgDir, tag.replace(/\W+/g, '_') + '.pcb.svg'), pcbToSvg(b))
     } catch (e) {
