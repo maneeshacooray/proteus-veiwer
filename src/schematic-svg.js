@@ -15,7 +15,8 @@ export function schematicToSvg(sch) {
     const svg = sheetToSvg({ ...sch, parts: of(sch.parts), wires: of(sch.wires), terminals: of(sch.terminals), labels: of(sch.labels) })
     const vb = /viewBox="([^"]+)"/.exec(svg)[1].split(' ').map(Number) // mils
     return { vb, inner: svg.slice(svg.indexOf('>') + 1, svg.lastIndexOf('</svg>')) }
-  })
+  }).filter((s) => s.vb.every(Number.isFinite)) // a sheet with nothing drawable has no extent
+  if (!sheets.length) return sheetToSvg(sch)
   const width = Math.max(...sheets.map((s) => s.vb[2]))
   let y = 0
   const body = sheets.map((s, i) => {

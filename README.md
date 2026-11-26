@@ -37,14 +37,14 @@ Checked against Proteus's own exports from 15 public GitHub boards (`tools/compa
 
 | | Matches Proteus |
 |---|---|
-| Pads (position) / drill holes | 95–100% on 12 of 13 boards |
+| Pad positions and sizes, drill holes | 100% on 9 of 13 boards, 93–98% on the rest |
+| Copper (tracks, pours, thermal reliefs, all layers) | 99–100% on 11 of 13 boards, 95% on the other two |
 | Track width | 99–100% |
-| Parsed tracks that are real copper | 97–100% |
 | Part references on the schematic PDF | 86–100% |
 
 Two boards whose Gerbers predate later edits were excluded.
 
-**Not yet supported:** copper pours/zones, the board-edge layer (the outline is estimated), inner layers, bottom silk text. Exported PDFs/Gerbers take precedence when dropped alongside a `.pdsprj`.
+**Limits:** pours are drawn as Proteus last filled them (it refills on export), boards with nothing on the board-edge layer (and very old files) get an outline estimated from the parts, and some per-pin pad rotations are approximate. Exported PDFs/Gerbers take precedence when dropped alongside a `.pdsprj`.
 
 ## Tech
 

@@ -6,12 +6,13 @@
 // The Gerbers are the ground truth. Reports, after aligning the two coordinate systems:
 //   holes   – drill holes that a parsed pad (or via) has at the same spot, and whether the size agrees
 //   pads    – copper flashes matched by a parsed pad, and whether the pad size agrees
+//   zones   – share of Proteus's pour hatching that falls inside the parsed pour fill
 //   tracks  – share of Gerber track length (board edge and zone hatching set aside) that the parsed tracks cover on the same layer (recall),
 //             share of parsed track length that is in the Gerber (precision), and width agreement
 import fs from 'node:fs'
 import path from 'node:path'
 import JSZip from 'jszip'
-import { parseLyt, placeTransform } from '../src/lyt.js'
+import { parseLyt, placeTransform, pinStyleLookup, loosePads, thermals } from '../src/lyt.js'
 import { classifyGerber } from '../src/layers.js'
 
 const U = 2540000 // units per inch
@@ -24,10 +25,27 @@ const asJson = process.argv.includes('--json')
 function parseGerber(text) {
   let fmt = { int: 2, dec: 4 }, scale = U, ap = null, x = 0, y = 0, region = false
   const apertures = new Map(), flashes = [], draws = []
+  const macros = new Map()
+  let macro = null // aperture macro being read: extent of its primitives
   for (let cmd of text.replace(/\r?\n/g, '').split('*')) {
     cmd = cmd.replace(/%/g, '').trim()
     let m
-    if ((m = /^FS[LT]?A?X(\d)(\d)Y\d\d/.exec(cmd))) fmt = { int: +m[1], dec: +m[2] }
+    if (macro && /^\d+,/.test(cmd)) {
+      // primitives: 1 circle (d, x, y), 4 outline (n, points…), 21 centre rect (w, h, x, y)
+      const v = cmd.split(',').map(Number), b = macro.box
+      const add = (x, y) => { b[0] = Math.min(b[0], x); b[1] = Math.min(b[1], y); b[2] = Math.max(b[2], x); b[3] = Math.max(b[3], y) }
+      if (v[0] === 1) { add(v[3] - v[2] / 2, v[4] - v[2] / 2); add(v[3] + v[2] / 2, v[4] + v[2] / 2) }
+      else if (v[0] === 4) for (let k = 0; k <= v[2]; k++) add(v[3 + 2 * k], v[4 + 2 * k])
+      else if (v[0] === 21) { add(v[4] - v[2] / 2, v[5] - v[3] / 2); add(v[4] + v[2] / 2, v[5] + v[3] / 2) }
+      continue
+    }
+    macro = null
+    if ((m = /^AM([\w.$]+)$/.exec(cmd))) { macro = { box: [Infinity, Infinity, -Infinity, -Infinity] }; macros.set(m[1], macro) }
+    else if ((m = /^ADD(\d+)([A-Za-z_$][\w.$]*)$/.exec(cmd)) && macros.has(m[2])) {
+      const b = macros.get(m[2]).box
+      if (b[0] <= b[2]) apertures.set(+m[1], { shape: 'M', w: (b[2] - b[0]) * scale, h: (b[3] - b[1]) * scale })
+    }
+    else if ((m = /^FS[LT]?A?X(\d)(\d)Y\d\d/.exec(cmd))) fmt = { int: +m[1], dec: +m[2] }
     else if (cmd === 'MOIN') scale = U
     else if (cmd === 'MOMM') scale = U / 25.4
     else if ((m = /^ADD(\d+)([A-Z]+),([\d.]+)(?:X([\d.]+))?/.exec(cmd))) {
@@ -74,28 +92,40 @@ async function model(file) {
   const f = Object.values(zip.files).find((x) => x.name.toUpperCase() === 'ROOT.LYT')
   const b = parseLyt(await f.async('uint8array'))
   const pads = []
+  const pinStyle = pinStyleLookup(b)
   for (const pl of b.placements) {
     const fp = b.footprints.get(pl.footprint)
     if (!fp) continue
     for (const p of fp.pads) {
-      const st = b.padStyles.get(p.style)
       const [x, y] = placeTransform([p.x, p.y], pl)
+      const style = pinStyle(x, y) || p.style
+      const st = b.padStyles.get(style)
       const quarter = Math.round(pl.rot / 90) % 2 === 1
-      pads.push({ x, y, w: st ? (quarter ? st.h : st.w) : 0, h: st ? (quarter ? st.w : st.h) : 0, hole: st?.hole || 0, ref: `${pl.ref?.text || pl.footprint}.${p.number}`, smd: st && !st.hole, style: p.style, fp: pl.footprint, rot: pl.rot })
+      pads.push({ x, y, w: st ? (quarter ? st.h : st.w) : 0, h: st ? (quarter ? st.w : st.h) : 0, hole: st?.hole || 0, ref: `${pl.ref?.text || pl.footprint}.${p.number}`, smd: st && !st.hole, style, fp: pl.footprint, rot: pl.rot })
     }
   }
-  for (const fp of b.freePads || []) {
+  for (const fp of [...(b.freePads || []), ...loosePads(b)]) {
     const st = b.padStyles.get(fp.style)
     const quarter = Math.round(fp.rot / 90) % 2 === 1
     pads.push({ x: fp.x, y: fp.y, w: st ? (quarter ? st.h : st.w) : 0, h: st ? (quarter ? st.w : st.h) : 0, hole: st?.hole || 0, ref: `pad.${fp.style}`, smd: st && !st.hole, style: fp.style })
   }
-  const segs = b.tracks.flatMap((t) => t.points.slice(1).map((q, i) => ({ a: t.points[i], b: q, w: t.width, side: t.layer === 0 ? 'top' : 'bottom' })))
+  const segs = b.tracks.flatMap((t) => t.points.slice(1).map((q, i) => ({ a: t.points[i], b: q, w: t.width, side: sideOf(t.layer) })))
+  // zone fill outlines are stroked with the boundary width in the Gerber, so they count as copper strokes
+  const zones = []
+  for (const z of b.zones || []) for (const isl of z.islands) {
+    const side = sideOf(z.layer), rings = [isl.outer, ...isl.holes]
+    zones.push({ side, rings, w: z.boundaryWidth })
+    for (const ring of rings) ring.forEach((p, i) => segs.push({ a: p, b: ring[(i + 1) % ring.length], w: z.boundaryWidth, side, zone: true }))
+  }
+  for (const t of thermals(b)) segs.push({ a: t.a, b: t.b, w: t.width, side: sideOf(t.layer), zone: true })
   const vias = (b.vias || []).map((v) => ({ x: v.x, y: v.y, hole: v.hole || 0, w: v.d, h: v.d }))
-  return { pads, segs, vias, placements: b.placements.length }
+  return { pads, segs, vias, zones, placements: b.placements.length }
 }
 
 /* ---------- compare ---------- */
 
+// LYT layer ids: 0 top, 15 bottom, 1–14 inner layers; Gerber inner files are numbered the same way
+function sideOf(layer) { return layer === 0 ? 'top' : layer === 15 ? 'bottom' : 'in' + layer }
 const m = await model(file)
 const files = fs.readdirSync(dir)
 const gt = { holes: [], flashes: { top: [], bottom: [] }, draws: { top: [], bottom: [] } }
@@ -108,10 +138,12 @@ for (const n of files) {
     if (/^G04|%FS/m.test(text.slice(0, 2000))) gt.holes.push(...parseGerber(text).flashes.map((f) => ({ x: f.x, y: f.y, d: f.w })))
     else gt.holes.push(...parseDrill(text))
   }
-  else if (c.type === 'copper' && (c.side === 'top' || c.side === 'bottom')) {
+  else if (c.type === 'copper') {
+    const side = c.side === 'inner' ? 'in' + (/inner\D*(\d+)/i.exec(n)?.[1] || 1) : c.side
+    if (!['top', 'bottom'].includes(side) && !side.startsWith('in')) continue
     const g = parseGerber(text)
-    gt.flashes[c.side].push(...g.flashes)
-    gt.draws[c.side].push(...g.draws)
+    gt.flashes[side] = (gt.flashes[side] || []).concat(g.flashes)
+    gt.draws[side] = (gt.draws[side] || []).concat(g.draws)
   }
 }
 
@@ -148,6 +180,7 @@ for (let round = 0; round < 4; round++) {
 const shift = (p) => ({ ...p, x: p.x + ox, y: p.y + oy })
 const pads = m.pads.map(shift)
 const vias = m.vias.map(shift)
+const zones = m.zones.map((z) => ({ ...z, rings: z.rings.map((r) => r.map(([x, y]) => [x + ox, y + oy])) }))
 const segs = m.segs.map((s) => ({ ...s, a: [s.a[0] + ox, s.a[1] + oy], b: [s.b[0] + ox, s.b[1] + oy] }))
 
 const TOL = 3 * MIL
@@ -173,6 +206,7 @@ const viaHoles = unmatchedHoles.filter((h) => trackVerts.some(([x, y]) => Math.h
 // pads vs flashes (a via is also flashed on copper; don't count those)
 let fTotal = 0, fMatch = 0, fSize = 0
 const missedFlashes = []
+const sizeMiss = new Map()
 for (const side of ['top', 'bottom']) for (const fl of gt.flashes[side]) {
   if (vias.length ? near(vias, fl.x, fl.y) : viaHoles.some((h) => Math.hypot(h.x - fl.x, h.y - fl.y) <= TOL)) continue
   fTotal++
@@ -180,11 +214,13 @@ for (const side of ['top', 'bottom']) for (const fl of gt.flashes[side]) {
   if (!p) { missedFlashes.push(fl); continue }
   fMatch++
   if ((close(p.w, fl.w) && close(p.h, fl.h)) || (close(p.w, fl.h) && close(p.h, fl.w))) fSize++
+  else { const k = `${p.style || p.ref} mine ${(p.w / MIL).toFixed(0)}x${(p.h / MIL).toFixed(0)} gerber ${fl.shape} ${(fl.w / MIL).toFixed(0)}x${(fl.h / MIL).toFixed(0)}`; sizeMiss.set(k, (sizeMiss.get(k) || 0) + 1) }
 }
 const extraPads = pads.filter((p) => !Object.values(gt.flashes).flat().some((fl) => Math.hypot(fl.x - p.x, fl.y - p.y) <= TOL))
 
 // tracks: sample along segments
 const STEP = 5 * MIL
+const missed = []
 function coverage(from, to, withWidth) {
   let total = 0, hit = 0, wOk = 0, wN = 0
   for (const s of from) {
@@ -196,6 +232,7 @@ function coverage(from, to, withWidth) {
       total++
       let bestD = Infinity, bestT = null
       for (const t of others) { const d = distSeg([x, y], t.a, t.b); if (d < bestD) { bestD = d; bestT = t } }
+      if (bestD > TOL && withWidth && missed.length < 4000) missed.push({ side: s.side, w: s.w, x, y })
       if (bestD <= TOL) {
         hit++
         if (withWidth) { wN++; if (close(bestT.w, s.w)) wOk++ }
@@ -210,11 +247,30 @@ const key = (d) => [d.a, d.b].map((p) => p.map((v) => Math.round(v / MIL)).join(
 const onTop = new Set(gt.draws.top.map(key)), onBottom = new Set(gt.draws.bottom.map(key))
 const isEdge = (d) => onTop.has(key(d)) && onBottom.has(key(d))
 const isHatch = (d) => d.w < 5 * MIL
-const allDraws = ['top', 'bottom'].flatMap((side) => gt.draws[side].map((d) => ({ ...d, side })))
+const allDraws = Object.keys(gt.draws).flatMap((side) => gt.draws[side].map((d) => ({ ...d, side })))
 const gtSegs = allDraws.filter((d) => !isEdge(d) && !isHatch(d))
 const edgeSegs = allDraws.filter(isEdge).length, hatchSegs = allDraws.filter((d) => !isEdge(d) && isHatch(d)).length
 const recall = coverage(gtSegs, segs, true)
 const precision = coverage(segs, allDraws, false)
+const perLayer = Object.fromEntries(Object.keys(gt.draws).map((side) => { const r = coverage(gtSegs.filter((d) => d.side === side), segs, false); return [side, r.total ? Math.round((100 * r.hit) / r.total) : null] }))
+// pours: share of Proteus's hatch strokes (sampled) that fall inside a parsed fill area
+const inRings = (x, y, rings) => {
+  let c = false
+  for (const r of rings) for (let i = 0, j = r.length - 1; i < r.length; j = i++) {
+    const [xi, yi] = r[i], [xj, yj] = r[j]
+    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) c = !c
+  }
+  return c
+}
+let zTotal = 0, zHit = 0
+for (const d of allDraws.filter((d) => !isEdge(d) && isHatch(d))) {
+  const L = Math.hypot(d.b[0] - d.a[0], d.b[1] - d.a[1]), n = Math.max(1, Math.round(L / (25 * MIL)))
+  for (let k = 0; k <= n; k++) {
+    const x = d.a[0] + ((d.b[0] - d.a[0]) * k) / n, y = d.a[1] + ((d.b[1] - d.a[1]) * k) / n
+    zTotal++
+    if (zones.some((z) => z.side === d.side && (inRings(x, y, z.rings) || z.rings.some((r) => r.some((p, i) => distSeg([x, y], p, r[(i + 1) % r.length]) <= z.w / 2 + TOL))))) zHit++
+  }
+}
 const widths = [...new Set(gtSegs.map((s) => +(s.w / MIL).toFixed(1)))].sort((a, b) => a - b)
 const myWidths = [...new Set(segs.map((s) => +(s.w / MIL).toFixed(1)))].sort((a, b) => a - b)
 
@@ -224,7 +280,8 @@ const report = {
   offsetMil: [Math.round(ox / MIL), Math.round(oy / MIL)], alignVotes: best?.[1] || 0,
   holes: { gerber: gt.holes.length, matched: hMatch, pct: pct(hMatch, gt.holes.length), sizeOk: pct(hSize, hMatch), vias: viaHoles.length, otherMissed: unmatchedHoles.length - viaHoles.length },
   pads: { gerberFlashes: fTotal, matched: fMatch, pct: pct(fMatch, fTotal), sizeOk: pct(fSize, fMatch), parsedPads: pads.length, notInGerber: extraPads.length },
-  tracks: { gerberSegs: gtSegs.length, edgeSegs, zoneHatchSegs: hatchSegs, parsedSegs: segs.length, recallPct: pct(recall.hit, recall.total), precisionPct: pct(precision.hit, precision.total), widthOk: pct(recall.wOk, recall.wN), gerberWidthsMil: widths, parsedWidthsMil: myWidths },
+  zones: { parsed: zones.length, hatchSamples: zTotal, coveredPct: pct(zHit, zTotal) },
+  tracks: { gerberSegs: gtSegs.length, edgeSegs, zoneHatchSegs: hatchSegs, parsedSegs: segs.length, recallPct: pct(recall.hit, recall.total), recallByLayer: perLayer, precisionPct: pct(precision.hit, precision.total), widthOk: pct(recall.wOk, recall.wN), gerberWidthsMil: widths, parsedWidthsMil: myWidths },
 }
 const ovIdx = process.argv.indexOf('--overlay')
 if (ovIdx > 0) {
@@ -246,7 +303,12 @@ else {
   console.log(JSON.stringify(report, null, 1))
   if (process.argv.includes('--details')) {
     console.log('missed flashes (sample):', missedFlashes.slice(0, 10).map((f) => `${(f.x / U).toFixed(3)},${(f.y / U).toFixed(3)} ${f.shape} ${(f.w / MIL).toFixed(0)}x${(f.h / MIL).toFixed(0)}`))
-    console.log('pads not in gerber (sample):', extraPads.slice(0, 10).map((p) => `${p.ref} ${(p.x / U).toFixed(3)},${(p.y / U).toFixed(3)}`))
+    const mb = new Map(); for (const q of missed) { const k = `${q.side} ${(q.w / MIL).toFixed(0)}th`; mb.set(k, (mb.get(k) || 0) + 1) }
+    console.log('missed track samples by layer/width:', [...mb].sort((x, y) => y[1] - x[1]).slice(0, 8))
+    const cl = []; for (const q of missed) if (!cl.some((c) => c.side === q.side && Math.hypot(c.x - q.x, c.y - q.y) < 100 * MIL)) cl.push(q)
+    console.log('missed track places:', cl.slice(0, 12).map((q) => `${q.side} ${(q.w / MIL).toFixed(0)}th ${(q.x / U).toFixed(3)},${(q.y / U).toFixed(3)}`))
+    console.log('size mismatches by style:', [...sizeMiss].sort((x, y) => y[1] - x[1]).slice(0, 12))
+    console.log('pads not in gerber (sample):', extraPads.slice(0, 14).map((p) => `${p.ref} ${(p.w / MIL).toFixed(0)}x${(p.h / MIL).toFixed(0)} ${(p.x / U).toFixed(3)},${(p.y / U).toFixed(3)}`))
   }
 }
 

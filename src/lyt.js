@@ -11,14 +11,25 @@
 //   Board: placements [x][y][i16 rotation (0.1°), u16 flags (bit 0 = bottom side)][u32 index][pstr footprint],
 //     tracks [pstr net][u32 segments n][layer][trace-style index][…variable…][n+1 points] ff ff ff ff
 //       (trace styles are the ";TS" text table; the header length varies, so points are found from the terminator),
-//     vias [u32][ff ff 00 80][u8 index into the pad/via style table][00][u8][x][y],
+//     vias [u32][ff ff 00 80][u8 index into the pad/via style table][00][u8][x][y] (with a pad style:
+//       a placed pin, giving its actual pad style),
 //     free pads: like a placement but naming a pad style instead of a footprint,
-//     board outline as a graphics box/lines outside any footprint.
+//     board graphics [03][u32 layer][x][y][u32 rotation][graphics record relative to x,y]
+//       (layer 28 board edge, 16 top silk, 17 bottom silk).
 
+import { trailingString } from './dsn.js'
 const dec = new TextDecoder('windows-1252')
 export const UNITS_PER_INCH = 2540000
 const TOP_COPPER = 0x00
 const BOTTOM_COPPER = 0x0f
+export const EDGE_LAYER = 28, TOP_SILK = 16, BOTTOM_SILK = 17
+
+/** Corner/vertex points of a board graphic, for extents. */
+export function shapePoints(g) {
+  if (g.type === 2) return [[g.cx - g.r, g.cy - g.r], [g.cx + g.r, g.cy + g.r]]
+  if (g.type === 4) return [[g.x, g.y]]
+  return g.points || []
+}
 
 export function parseLyt(bytes) {
   const d = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
@@ -90,6 +101,7 @@ export function parseLyt(bytes) {
     else if (type === 1) { rec.x = i32(body); rec.y = i32(body + 4); rec.w = i32(body + 12); rec.h = i32(body + 16) }
     else if (type === 2) { rec.cx = i32(body); rec.cy = i32(body + 4); rec.r = i32(body + 8) }
     else if (type === 3) rec.points = pts(4)
+    else if (type === 4) { rec.x = i32(body); rec.y = i32(body + 4); rec.size = i32(body + 16); rec.text = trailingString(d, body, o + len) }
     else if (type === 7) { // path, see dsn.js
       const n = u32(body)
       if (n < 2 || n > 2000 || body + 22 + 10 * n > o + len) return { type: -1, len }
@@ -163,6 +175,7 @@ export function parseLyt(bytes) {
   const tracks = []
   const vias = []
   const freePads = []
+  const pinPads = []
   const labels = []
   let outline = null
 
@@ -187,15 +200,16 @@ export function parseLyt(bytes) {
         }
       }
       // track: [pstr net (may be empty)][u32 n][layer][style][…][n+1 points] ffffffff
-      if (name !== null && (L === 0 || /^[\x21-\x7e]+$/.test(name))) {
+      if (name !== null && (L === 0 || /^[\x21-\x7e][\x20-\x7e]*$/.test(name))) {
         const o = p + 1 + L
         const n = u32(o)
         const layer = d[o + 4]
         // header length varies between Proteus versions; the n+1 points always end in ffffffff,
         // so find the start that puts the terminator exactly after them
         const styleOk = !traceStyles.length || d[o + 5] < traceStyles.length
-        // only outer copper for now; records on inner layer ids are not tracks on these 2-layer boards
-        if (n >= 1 && n < 1000 && (layer === TOP_COPPER || layer === BOTTOM_COPPER) && styleOk) {
+        // layers: 0 top, 15 bottom, 1–14 inner. Inner-layer records without a net are other data.
+        const inner = layer > TOP_COPPER && layer < BOTTOM_COPPER
+        if (n >= 1 && n < 1000 && layer <= BOTTOM_COPPER && styleOk && !(inner && L === 0)) {
           let ps = -1
           for (let q = o + 18; q <= o + 40; q++) {
             const e = q + 8 * (n + 1)
@@ -213,10 +227,12 @@ export function parseLyt(bytes) {
             const end = ps + 8 * (n + 1)
             const pts = []
             for (let k = 0; k <= n; k++) pts.push([i32(ps + 8 * k), i32(ps + 4 + 8 * k)])
-            // real tracks: in range, never at the exact origin, no repeated consecutive points
-            const sane = pts.every(([a, b], k) => Math.abs(a) < 50 * UNITS_PER_INCH && Math.abs(b) < 50 * UNITS_PER_INCH &&
-              !(Math.abs(a) < 2540 && Math.abs(b) < 2540) && (k === 0 || a !== pts[k - 1][0] || b !== pts[k - 1][1]))
-            if (sane) {
+            // real tracks: in range, never at the exact origin
+            const sane = pts.every(([a, b]) => Math.abs(a) < 50 * UNITS_PER_INCH && Math.abs(b) < 50 * UNITS_PER_INCH &&
+              !(Math.abs(a) < 2540 && Math.abs(b) < 2540))
+            // a repeated point is harmless; a track that is nothing but one point is not a track
+            for (let k = pts.length - 1; k > 0; k--) if (pts[k][0] === pts[k - 1][0] && pts[k][1] === pts[k - 1][1]) pts.splice(k, 1)
+            if (sane && pts.length >= 2 && !(inner && pts.some(([a, b]) => Math.abs(a) < 2540 || Math.abs(b) < 2540))) {
               // two equal int32s in the header
               const raw = Array.from(d.subarray(o + 5, ps))
               const width = traceStyles[d[o + 5]]?.w || 10 * 2540
@@ -231,23 +247,119 @@ export function parseLyt(bytes) {
     // via: [u32][ff ff 00 80][u8 style index → a *VIA style][00][u8 flags][x][y]
     if (d[p] === 0xff && d[p + 1] === 0xff && d[p + 2] === 0x00 && d[p + 3] === 0x80 && d[p + 5] === 0 && p + 15 < d.length) {
       const st = styleList[d[p + 4]]
-      if (st && /VIA$/.test(st.kind)) {
-        const x = i32(p + 7), y = i32(p + 11)
-        if (Math.abs(x) < 50 * UNITS_PER_INCH && Math.abs(y) < 50 * UNITS_PER_INCH) {
-          vias.push({ x, y, d: st.w, hole: st.hole, style: st.name })
-          p += 14
-          continue
-        }
+      const x = i32(p + 7), y = i32(p + 11)
+      if (st && Math.abs(x) < 50 * UNITS_PER_INCH && Math.abs(y) < 50 * UNITS_PER_INCH) {
+        if (/VIA$/.test(st.kind)) vias.push({ x, y, d: st.w, hole: st.hole, style: st.name })
+        // the same record with a pad style is a placed pin: its actual pad (overrides the footprint's)
+        else pinPads.push({ x, y, style: st.name, net: u32(p + 28) === 1 && d[p + 32] ? tryStr(d, p + 33, d[p + 32]) : null })
+        p += 14
+        continue
       }
-    }
-    // board outline: a graphics box outside the footprint library
-    if (!outline && p > libEnd && d[p + 9] === 2 && d[p + 8] === 1) {
-      const r = readRecord(p, d.length)
-      if (r && r.type === 1 && r.w > 0 && r.h > 0) outline = r
     }
   }
 
-  return { padStyles, traceStyles, footprints, placements, freePads, tracks, vias, outline, labels }
+  const zones = parseZones()
+  const graphics = parseBoardGraphics()
+  const edge = graphics.filter((g) => g.layer === EDGE_LAYER)
+  if (edge.length) {
+    const pts = edge.flatMap(shapePoints)
+    const xs = pts.map((q) => q[0]), ys = pts.map((q) => q[1])
+    outline = { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys), shapes: edge }
+  }
+
+  return { padStyles, traceStyles, footprints, placements, freePads, pinPads, tracks, vias, zones, outline, graphics, labels }
+
+  // Graphics placed on the board itself, moved from the record's local frame to board coordinates.
+  function parseBoardGraphics() {
+    const out = []
+    for (let p = libEnd + 17; p < d.length - 48; p++) {
+      if (d[p + 9] !== 2 || d[p - 17] !== 3) continue
+      const layer = u32(p - 16)
+      if (layer > 63) continue
+      const ox = i32(p - 12), oy = i32(p - 8), rot = u32(p - 4)
+      if (Math.abs(ox) > 50 * UNITS_PER_INCH || Math.abs(oy) > 50 * UNITS_PER_INCH || rot > 3600) continue
+      const r = readRecord(p, d.length)
+      if (!r || r.type < 0 || r.type === 6 || r.type === 8) continue
+      const a = (rot / 10) * Math.PI / 180, c = Math.cos(a), sn = Math.sin(a)
+      const T = ([x, y]) => [Math.round(ox + x * c - y * sn), Math.round(oy + x * sn + y * c)]
+      const g = { layer, type: r.type, width: r.width }
+      if (r.type === 0 || r.type === 3 || r.type === 7) { g.points = r.points.map(T); if (r.kinds) g.kinds = r.kinds }
+      else if (r.type === 1) g.points = [[r.x, r.y], [r.x + r.w, r.y], [r.x + r.w, r.y + r.h], [r.x, r.y + r.h]].map(T)
+      else if (r.type === 2) { [g.cx, g.cy] = T([r.cx, r.cy]); g.r = Math.abs(r.r) }
+      else if (r.type === 4) { [g.x, g.y] = T([r.x, r.y]); g.size = r.size; g.text = r.text; g.rot = rot / 10 }
+      else continue
+      out.push(g)
+      p += r.len - 1
+    }
+    return out
+  }
+
+
+  // Copper zones (pours). Record: [net][00][01][layer][u32 len][outline as a path record body]
+  // [net][boundary trace style][relief trace style][u32 clearance]…[outline again][islands…].
+  // Proteus stores the computed fill as islands (outer polygon + holes); the copper is that area
+  // plus half the boundary trace width all round.
+  function parseZones() {
+    const out = []
+    const names = new Set(traceStyles.map((t) => t.name))
+    const pstrAt = (q) => (d[q] >= 1 && d[q] <= 60 ? tryStr(d, q + 1, d[q]) : null)
+    for (let p = 0x200; p < d.length - 64; p++) {
+      const net = pstrAt(p)
+      if (net === null) continue
+      const q = p + 1 + net.length, bs = pstrAt(q)
+      if (bs === null || !names.has(bs)) continue
+      const r = q + 1 + bs.length, rs = pstrAt(r)
+      if (rs === null || !names.has(rs)) continue
+      // outline path ending exactly where the net name starts: [layer][u32 length = 26 + 10n][n][bbox][u16][pts][kinds]
+      let layer = -1, outline = null
+      for (let h = p - 40; h > Math.max(0, p - 40000); h--) {
+        const n = u32(h + 4)
+        if (n < 3 || n > 4000 || u32(h) !== 26 + 10 * n || h + 26 + 10 * n !== p) continue
+        layer = d[h - 1]
+        outline = Array.from({ length: n }, (_, k) => [i32(h + 26 + 8 * k), i32(h + 30 + 8 * k)])
+        break
+      }
+      if (!outline || layer > BOTTOM_COPPER) continue
+      const e = r + 1 + rs.length
+      const clearance = u32(e)
+      // fill: [u32 island count] then per island [outer polygon][u32 hole count][holes…],
+      // each polygon [u32 n][n points] (n may be 0). Found a few bytes after the clearance.
+      const xs = outline.map((q) => q[0]), ys = outline.map((q) => q[1])
+      const box = [Math.min(...xs) - UNITS_PER_INCH, Math.max(...xs) + UNITS_PER_INCH, Math.min(...ys) - UNITS_PER_INCH, Math.max(...ys) + UNITS_PER_INCH]
+      const poly = (s) => {
+        const n = u32(s)
+        if (n > 20000 || s + 4 + 8 * n > d.length) return null
+        const pts = Array.from({ length: n }, (_, k) => [i32(s + 4 + 8 * k), i32(s + 8 + 8 * k)])
+        return pts.every(([x, y]) => x > box[0] && x < box[1] && y > box[2] && y < box[3]) ? { pts, end: s + 4 + 8 * n } : null
+      }
+      const readFill = (o) => {
+        const count = u32(o)
+        if (count < 1 || count > 5000) return null
+        const islands = []
+        o += 4
+        for (let k = 0; k < count; k++) {
+          const outer = poly(o)
+          if (!outer) return null
+          const holes = u32(outer.end)
+          if (holes > 10000) return null
+          let s = outer.end + 4
+          const hs = []
+          for (let j = 0; j < holes; j++) { const hp = poly(s); if (!hp) return null; if (hp.pts.length >= 3) hs.push(hp.pts); s = hp.end }
+          if (outer.pts.length >= 3) islands.push({ outer: outer.pts, holes: hs })
+          o = s
+        }
+        return islands.length ? { islands, end: o } : null
+      }
+      let fill = null
+      for (let s = e + 4; s < e + 64 && !fill; s++) fill = readFill(s)
+      if (!fill) continue
+      const islands = fill.islands, o = fill.end
+      const bw = traceStyles.find((t) => t.name === bs)?.w || 0
+      out.push({ net, layer, outline, boundaryWidth: bw, relief: rs, clearance, islands })
+      p = o
+    }
+    return out
+  }
 
   function readLabelAfter(o) {
     // "ff <pstr text> x y … Vector Font\0PART REFERENCE"
@@ -274,6 +386,81 @@ function tryStr(d, o, n) {
   if (o + n > d.length) return null
   for (let k = 0; k < n; k++) if (!isPrint(d[o + k])) return null
   return str(d, o, n)
+}
+
+/** Looks up the pad style a placed pin actually uses (per-pin overrides), by board position. */
+export function pinStyleLookup(pcb) {
+  const m = new Map()
+  const key = (x, y) => `${Math.round(x / 2540)},${Math.round(y / 2540)}`
+  for (const p of pcb.pinPads || []) m.set(key(p.x, p.y), p.style)
+  return (x, y) => m.get(key(x, y))
+}
+
+/** Pad records that no footprint pin or free pad accounts for: stand-alone pads (mounting holes…). */
+export function loosePads(pcb) {
+  const key = (x, y) => `${Math.round(x / 2540)},${Math.round(y / 2540)}`
+  const used = new Set((pcb.freePads || []).map((p) => key(p.x, p.y)))
+  for (const pl of pcb.placements) {
+    const fp = pcb.footprints.get(pl.footprint)
+    if (fp) for (const pad of fp.pads) used.add(key(...placeTransform([pad.x, pad.y], pl)))
+  }
+  // keep only pads on the board: inside the outline, or near the parts when there is none
+  const o = pcb.outline, m = UNITS_PER_INCH / 2
+  const xs = pcb.placements.map((p) => p.x), ys = pcb.placements.map((p) => p.y)
+  const box = o ? [o.x, o.y, o.x + o.w, o.y + o.h] : [Math.min(...xs) - m, Math.min(...ys) - m, Math.max(...xs) + m, Math.max(...ys) + m]
+  return (pcb.pinPads || []).filter((p) => !used.has(key(p.x, p.y)) && !(Math.abs(p.x) < 2540 && Math.abs(p.y) < 2540) &&
+    p.x >= box[0] && p.x <= box[2] && p.y >= box[1] && p.y <= box[3]).map((p) => ({ ...p, rot: 0 }))
+}
+
+/**
+ * Thermal-relief spokes: pads on a pour's net that sit in a clearance hole of that pour are tied
+ * to it by four spokes of the pour's relief trace width. Returns [{layer, width, a, b, net}].
+ */
+export function thermals(pcb) {
+  const out = []
+  if (!pcb.zones?.length) return out
+  const key = (x, y) => `${Math.round(x / 2540)},${Math.round(y / 2540)}`
+  const bottomAt = new Set(), quarterAt = new Set()
+  for (const pl of pcb.placements) {
+    const fp = pcb.footprints.get(pl.footprint)
+    if (!fp) continue
+    for (const pad of fp.pads) {
+      const k = key(...placeTransform([pad.x, pad.y], pl))
+      if (pl.bottom) bottomAt.add(k)
+      if (Math.round(pl.rot / 90) % 2 === 1) quarterAt.add(k)
+    }
+  }
+  const inside = (x, y, r) => {
+    let c = false
+    for (let i = 0, j = r.length - 1; i < r.length; j = i++) {
+      const [xi, yi] = r[i], [xj, yj] = r[j]
+      if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) c = !c
+    }
+    return c
+  }
+  for (const z of pcb.zones) {
+    const width = pcb.traceStyles.find((t) => t.name === z.relief)?.w || z.boundaryWidth
+    for (const p of pcb.pinPads || []) {
+      if (p.net !== z.net) continue
+      const st = pcb.padStyles.get(p.style)
+      if (!st) continue
+      const onLayer = st.hole ? true : z.layer === (bottomAt.has(key(p.x, p.y)) ? 15 : 0)
+      if (!onLayer) continue
+      const isl = z.islands.find((i) => inside(p.x, p.y, i.outer) && i.holes.some((h) => inside(p.x, p.y, h)))
+      if (!isl) continue
+      // a spoke is only made where it reaches poured copper (Proteus drops blocked ones)
+      const inFill = (x, y) => z.islands.some((i) => inside(x, y, i.outer) && !i.holes.some((h) => inside(x, y, h)))
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const q = quarterAt.has(key(p.x, p.y))
+        const half = (dx ? (q ? st.h : st.w) : (q ? st.w : st.h)) / 2
+        const reach = half + z.clearance + z.boundaryWidth
+        const probe = half + z.clearance + z.boundaryWidth / 2 + width
+        if (!inFill(p.x + dx * probe, p.y + dy * probe)) continue
+        out.push({ layer: z.layer, width, net: z.net, a: [p.x, p.y], b: [p.x + dx * reach, p.y + dy * reach] })
+      }
+    }
+  }
+  return out
 }
 
 export function placeTransform([x, y], pl) {
