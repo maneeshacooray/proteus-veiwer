@@ -12,6 +12,7 @@ const COLORS = {
   pad: '#c9a227',
   hole: '#111',
   silk: '#f2f2f2',
+  outside: '#ff3b30',
 }
 
 export function pcbToSvg(pcb, { side = 'top' } = {}) {
@@ -19,15 +20,24 @@ export function pcbToSvg(pcb, { side = 'top' } = {}) {
   const zoneEls = { top: [], bottom: [], inner: [] }
   const layerName = (l) => (l === 0 ? 'top' : l === 15 ? 'bottom' : 'inner')
   const box = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity }
+  // Copper items, each with the area it covers, to find any that lie outside the board edge.
+  const items = []
+  let cur = null
+  const item = (kind, label) => { cur = { kind, label, minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity }; items.push(cur) }
   const grow = (x, y, r = 0) => {
     box.minX = Math.min(box.minX, x - r); box.maxX = Math.max(box.maxX, x + r)
     box.minY = Math.min(box.minY, y - r); box.maxY = Math.max(box.maxY, y + r)
+    if (cur) {
+      cur.minX = Math.min(cur.minX, x - r); cur.maxX = Math.max(cur.maxX, x + r)
+      cur.minY = Math.min(cur.minY, y - r); cur.maxY = Math.max(cur.maxY, y + r)
+    }
   }
 
   // copper pours: stored fill area, stroked with the boundary trace width
   for (const z of pcb.zones || []) {
     const ring = (pts) => 'M' + pts.map(([x, y]) => `${f(x)},${f(-y)}`).join('L') + 'Z'
     for (const isl of z.islands) {
+      item('pour', `${z.net || 'unnamed'} pour`)
       isl.outer.forEach(([x, y]) => grow(x, y))
       const dd = ring(isl.outer) + isl.holes.map(ring).join('')
       zoneEls[layerName(z.layer)].push(`<path d="${dd}" fill-rule="evenodd" stroke-width="${f(Math.max(z.boundaryWidth, 2540))}" stroke-linejoin="round"><title>${esc(z.net)} pour</title></path>`)
@@ -39,6 +49,7 @@ export function pcbToSvg(pcb, { side = 'top' } = {}) {
   }
 
   for (const t of pcb.tracks) {
+    item('track', t.net ? `track on ${t.net}` : 'track')
     const pts = t.points.map(([x, y]) => (grow(x, y), `${f(x)},${f(-y)}`)).join(' ')
     const target = els[layerName(t.layer)]
     target.push(`<polyline points="${pts}" fill="none" stroke-width="${f(Math.max(t.width, 2540 * 6))}" stroke-linecap="round" stroke-linejoin="round"><title>${esc(t.net)}</title></polyline>`)
@@ -49,6 +60,7 @@ export function pcbToSvg(pcb, { side = 'top' } = {}) {
     const fp = pcb.footprints.get(pl.footprint)
     if (!fp) continue
     const T = (p) => placeTransform(p, pl)
+    cur = null // silk may overhang the board edge; only the part's pads count
     const silk = pl.bottom ? els.silkBottom : els.silk // bottom-side silk is drawn only in the bottom view
     for (const g of fp.graphics) {
       const sw = f(Math.max(g.width || 0, 2540 * 6))
@@ -72,6 +84,7 @@ export function pcbToSvg(pcb, { side = 'top' } = {}) {
         pts.forEach((p) => grow(...p))
       }
     }
+    item('part', pl.ref?.text || pl.footprint)
     const fallback = fp.pads.find((p) => pcb.padStyles.get(p.style)?.w)?.style
     for (const pad of fp.pads) {
       const [x, y] = T([pad.x, pad.y])
@@ -101,6 +114,7 @@ export function pcbToSvg(pcb, { side = 'top' } = {}) {
     if (!st) continue
     const quarter = Math.round(fp.rot / 90) % 2 === 1
     const w = quarter ? st.h : st.w, h = quarter ? st.w : st.h
+    item('pad', `pad ${fp.style}`)
     grow(fp.x, fp.y, Math.max(w, h) / 2)
     const sq = /^S|SPAD|RSMPAD|SQ/.test(st.kind)
     els.pads.push(sq || w !== h
@@ -109,10 +123,13 @@ export function pcbToSvg(pcb, { side = 'top' } = {}) {
     if (st.hole) els.pads.push(`<circle cx="${f(fp.x)}" cy="${f(-fp.y)}" r="${f(st.hole / 2)}" fill="${COLORS.hole}"/>`)
   }
   for (const v of pcb.vias || []) {
+    item('via', 'via')
     grow(v.x, v.y, v.d / 2)
     els.pads.push(`<circle cx="${f(v.x)}" cy="${f(-v.y)}" r="${f(v.d / 2)}"><title>via</title></circle>`)
     if (v.hole) els.pads.push(`<circle cx="${f(v.x)}" cy="${f(-v.y)}" r="${f(v.hole / 2)}" fill="${COLORS.hole}"/>`)
   }
+
+  cur = null
 
   // silk drawn on the board itself (not part of a footprint)
   for (const gr of pcb.graphics || []) {
@@ -125,18 +142,27 @@ export function pcbToSvg(pcb, { side = 'top' } = {}) {
   // Board shape: the drawn outline when it really encloses the parts, else the parts' extent.
   const o = pcb.outline
   const slack = 0.05 * UNITS_PER_INCH
-  const encloses = o && o.x <= box.minX + slack && o.y <= box.minY + slack && o.x + o.w >= box.maxX - slack && o.y + o.h >= box.maxY - slack
+  const inside = (it) => it.minX >= o.x - slack && it.minY >= o.y - slack && it.maxX <= o.x + o.w + slack && it.maxY <= o.y + o.h + slack
+  const outside = o ? items.filter((it) => Number.isFinite(it.minX) && !inside(it)) : []
+  const encloses = o && !outside.length
   const margin = 0.1 * UNITS_PER_INCH
-  const b = encloses ? { x0: o.x, y0: o.y, x1: o.x + o.w, y1: o.y + o.h }
+  // with an edge, the view spans the edge and anything sticking out of it; without one, the parts plus a margin
+  const b = o
+    ? { x0: Math.min(o.x, box.minX - (encloses ? 0 : margin)), y0: Math.min(o.y, box.minY - (encloses ? 0 : margin)),
+        x1: Math.max(o.x + o.w, box.maxX + (encloses ? 0 : margin)), y1: Math.max(o.y + o.h, box.maxY + (encloses ? 0 : margin)) }
     : { x0: box.minX - margin, y0: box.minY - margin, x1: box.maxX + margin, y1: box.maxY + margin }
   // How the outline was found: 'edge' (board-edge layer), 'none' (the design has no board edge),
-  // 'outside' (a board edge exists but doesn't contain the parts). The last two are estimated.
+  // 'outside' (a board edge exists but some copper lies outside it; those items are outlined in red).
+  // Only 'none' is estimated.
   const outlineStatus = encloses ? 'edge' : o ? 'outside' : 'none'
   const pad = 0.15 * UNITS_PER_INCH
   const capH = encloses ? 0 : 0.14 * UNITS_PER_INCH
   const vb = [b.x0 - pad, -(b.y1 + pad + capH), b.x1 - b.x0 + 2 * pad, b.y1 - b.y0 + 2 * pad + capH]
-  const caption = encloses ? '' : `<text x="${f(b.x0)}" y="${f(-(b.y1 + pad * 0.6))}" font-size="${f(0.075 * UNITS_PER_INCH)}" fill="${COLORS.edge}">${
-    outlineStatus === 'none' ? 'No board edge in this design: dashed outline estimated from the parts' : 'Board edge does not contain the parts: dashed outline estimated from the parts'}</text>`
+  const summary = outsideSummary(outside)
+  const caption = encloses ? '' : `<text x="${f(b.x0)}" y="${f(-(b.y1 + pad * 0.6))}" font-size="${f(0.075 * UNITS_PER_INCH)}" fill="${o ? COLORS.outside : COLORS.edge}">${
+    o ? esc(`Outside the board edge (outlined in red): ${summary}`) : 'No board edge in this design: dashed outline estimated from the parts'}</text>`
+  const hp = 0.03 * UNITS_PER_INCH
+  const highlights = outside.map((it) => `<rect x="${f(it.minX - hp)}" y="${f(-it.maxY - hp)}" width="${f(it.maxX - it.minX + 2 * hp)}" height="${f(it.maxY - it.minY + 2 * hp)}" rx="${f(hp)}"><title>${esc(it.label)}: outside the board edge</title></rect>`)
   const flip = side === 'bottom' ? ` transform="translate(${f(2 * vb[0] + vb[2])},0) scale(-1,1)"` : ''
 
   const zone = (name, list, opacity) => `<g class="zone-${name}" fill="${COLORS[name]}" stroke="${COLORS[name]}" opacity="${opacity}">${list.join('')}</g>`
@@ -144,23 +170,38 @@ export function pcbToSvg(pcb, { side = 'top' } = {}) {
   const copper = side === 'bottom'
     ? [zone('top', zoneEls.top, 0.2), g('top', els.top, 0.35), ...inner, zone('bottom', zoneEls.bottom, 0.55), g('bottom', els.bottom, 0.95)]
     : [zone('bottom', zoneEls.bottom, 0.25), g('bottom', els.bottom, 0.45), ...inner, zone('top', zoneEls.top, 0.55), g('top', els.top, 0.95)]
-  const shape = encloses && o.shapes ? boardPath(o.shapes) : null
+  const shape = o?.shapes?.length ? boardPath(o.shapes) : null
 
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${vb.map(f).join(' ')}" width="${(vb[2] / UNITS_PER_INCH * PX_PER_INCH).toFixed(0)}" height="${(vb[3] / UNITS_PER_INCH * PX_PER_INCH).toFixed(0)}" font-family="Arial, Helvetica, sans-serif" data-outline="${outlineStatus}">
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${vb.map(f).join(' ')}" width="${(vb[2] / UNITS_PER_INCH * PX_PER_INCH).toFixed(0)}" height="${(vb[3] / UNITS_PER_INCH * PX_PER_INCH).toFixed(0)}" font-family="Arial, Helvetica, sans-serif" data-outline="${outlineStatus}"${outside.length ? ` data-outside="${esc(summary)}"` : ''}>
 ${caption}
 <g${flip}>
 ${shape
     ? `<path d="${shape}" fill="${COLORS.board}" fill-rule="evenodd" stroke="${COLORS.edge}" stroke-width="${f(2540 * 8)}" stroke-linejoin="round"/>`
-    : `<rect x="${f(b.x0)}" y="${f(-b.y1)}" width="${f(b.x1 - b.x0)}" height="${f(b.y1 - b.y0)}" rx="${f(0.03 * UNITS_PER_INCH)}" fill="${COLORS.board}" stroke="${COLORS.edge}" stroke-width="${f(2540 * 8)}" ${encloses ? '' : 'stroke-dasharray="40 30"'}/>`}
+    : o ? `<rect x="${f(o.x)}" y="${f(-(o.y + o.h))}" width="${f(o.w)}" height="${f(o.h)}" fill="${COLORS.board}" stroke="${COLORS.edge}" stroke-width="${f(2540 * 8)}"/>`
+    : `<rect x="${f(b.x0)}" y="${f(-b.y1)}" width="${f(b.x1 - b.x0)}" height="${f(b.y1 - b.y0)}" rx="${f(0.03 * UNITS_PER_INCH)}" fill="${COLORS.board}" stroke="${COLORS.edge}" stroke-width="${f(2540 * 8)}" stroke-dasharray="40 30"/>`}
 ${copper.join('\n')}
 <g fill="${COLORS.pad}">${els.pads.join('')}</g>
 <g stroke="${COLORS.silk}" fill="none" stroke-linecap="round">${(side === 'top' ? els.silk : els.silkBottom).join('')}</g>
+${highlights.length ? `<g class="outside" fill="${COLORS.outside}" fill-opacity="0.12" stroke="${COLORS.outside}" stroke-width="${f(2540 * 6)}">${highlights.join('')}</g>` : ''}
 </g>
 </svg>`
 
   function g(name, list, opacity) {
     return `<g class="layer-${name}" stroke="${COLORS[name]}" opacity="${opacity}">${list.join('')}</g>`
   }
+}
+
+// "parts U1 and J2, 4 tracks, 1 via": names for parts, counts for the rest.
+function outsideSummary(list) {
+  if (!list.length) return ''
+  const parts = list.filter((it) => it.kind === 'part').map((it) => it.label)
+  const out = []
+  if (parts.length) out.push(`${parts.length === 1 ? 'part' : 'parts'} ${parts.length > 6 ? parts.slice(0, 6).join(', ') + ` and ${parts.length - 6} more` : parts.join(', ')}`)
+  for (const [kind, one, many] of [['track', 'track', 'tracks'], ['pour', 'pour', 'pours'], ['via', 'via', 'vias'], ['pad', 'loose pad', 'loose pads']]) {
+    const n = list.filter((it) => it.kind === kind).length
+    if (n) out.push(`${n} ${n === 1 ? one : many}`)
+  }
+  return out.join(', ')
 }
 
 // Silk text; bottom-side text is stored mirrored, so it reads correctly once the bottom view flips it.

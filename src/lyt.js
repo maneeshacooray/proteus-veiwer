@@ -258,6 +258,20 @@ export function parseLyt(bytes) {
     }
   }
 
+  // Every real track in a file has the same header length (20–22 bytes, by Proteus version). Records
+  // that only look like tracks (header of another length; or no net, and a run of ff in the header or
+  // a point right by the origin) are other data: drop them.
+  const lens = new Map()
+  for (const t of tracks) if (t.net) lens.set(t.raw.length, (lens.get(t.raw.length) || 0) + 1)
+  const headerLen = [...lens].sort((a, b) => b[1] - a[1])[0]?.[0]
+  // A run of ff bytes inside the header is never seen on a real track either.
+  const ffRun = (r) => { let m = 0, c = 0; for (const x of r) { c = x === 0xff ? c + 1 : 0; m = Math.max(m, c) } return m }
+  for (let k = tracks.length - 1; k >= 0; k--) {
+    const t = tracks[k]
+    const nearOrigin = t.points.some(([x, y]) => Math.abs(x) < 60 * 2540 && Math.abs(y) < 60 * 2540)
+    if ((headerLen !== undefined && t.raw.length !== headerLen) || (!t.net && (ffRun(t.raw) >= 6 || nearOrigin))) tracks.splice(k, 1)
+  }
+
   const zones = parseZones()
   const graphics = parseBoardGraphics()
   const edge = graphics.filter((g) => g.layer === EDGE_LAYER)
