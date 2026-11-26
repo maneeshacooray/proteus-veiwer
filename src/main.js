@@ -82,12 +82,14 @@ async function openFiles(files) {
       }
       // Same for the PCB, unless Gerbers were dropped too.
       let drewPcb = false
+      let outline = null
       if (proj.hasLayout && !gerbers.length) {
         try {
           const pcb = parseLyt(proj.lyt)
           for (const side of ['top', 'bottom']) {
             const view = makeView(side)
             view.innerHTML = pcbToSvg(pcb, { side })
+            outline = view.querySelector('svg')?.dataset.outline || outline
           }
           views.layers?.remove()
           delete views.layers
@@ -99,7 +101,7 @@ async function openFiles(files) {
       loadProject(proj, {
         haveSchematic: drewSchematic || schematic.length > 0,
         havePcb: drewPcb || gerbers.length > 0,
-        native: { schematic: drewSchematic, pcb: drewPcb },
+        native: { schematic: drewSchematic, pcb: drewPcb, outline },
       })
       notes.push(projects[0].name)
     }
@@ -287,8 +289,14 @@ function loadProject(proj, { haveSchematic, havePcb, native = {} }) {
       <div class="notice info">
         ${[native.schematic && '<b>Schematic</b>', native.pcb && '<b>PCB Top / Bottom</b>'].filter(Boolean).join(' and ')}
         ${native.schematic && native.pcb ? 'are' : 'is'} drawn directly from this .pdsprj by a reverse-engineered reader.
-        Proteus doesn't document the format, so some details may differ from Proteus${native.pcb ? ', and the board outline is estimated from the parts when none is found' : ''}.
+        Proteus doesn't document the format, so some details may differ from Proteus.
         For a manufacturing-accurate view, drop the Gerber exports in as well.
+      </div>` : ''}
+      ${native.pcb && native.outline && native.outline !== 'edge' ? `
+      <div class="notice">
+        <b>${native.outline === 'none' ? 'This design has no board edge.' : "This design's board edge doesn't contain the parts."}</b>
+        ${native.outline === 'none' ? 'Nothing is drawn on the Board Edge layer in Proteus, so' : 'So'} the dashed outline in the PCB views is
+        estimated from the parts and isn't the real board shape. Draw the outline on the Board Edge layer in Proteus to fix this.
       </div>` : ''}
       ${haveSchematic && havePcb ? '' : `
       <div class="notice">

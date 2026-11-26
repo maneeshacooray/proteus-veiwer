@@ -129,8 +129,14 @@ export function pcbToSvg(pcb, { side = 'top' } = {}) {
   const margin = 0.1 * UNITS_PER_INCH
   const b = encloses ? { x0: o.x, y0: o.y, x1: o.x + o.w, y1: o.y + o.h }
     : { x0: box.minX - margin, y0: box.minY - margin, x1: box.maxX + margin, y1: box.maxY + margin }
+  // How the outline was found: 'edge' (board-edge layer), 'none' (the design has no board edge),
+  // 'outside' (a board edge exists but doesn't contain the parts). The last two are estimated.
+  const outlineStatus = encloses ? 'edge' : o ? 'outside' : 'none'
   const pad = 0.15 * UNITS_PER_INCH
-  const vb = [b.x0 - pad, -(b.y1 + pad), b.x1 - b.x0 + 2 * pad, b.y1 - b.y0 + 2 * pad]
+  const capH = encloses ? 0 : 0.14 * UNITS_PER_INCH
+  const vb = [b.x0 - pad, -(b.y1 + pad + capH), b.x1 - b.x0 + 2 * pad, b.y1 - b.y0 + 2 * pad + capH]
+  const caption = encloses ? '' : `<text x="${f(b.x0)}" y="${f(-(b.y1 + pad * 0.6))}" font-size="${f(0.075 * UNITS_PER_INCH)}" fill="${COLORS.edge}">${
+    outlineStatus === 'none' ? 'No board edge in this design: dashed outline estimated from the parts' : 'Board edge does not contain the parts: dashed outline estimated from the parts'}</text>`
   const flip = side === 'bottom' ? ` transform="translate(${f(2 * vb[0] + vb[2])},0) scale(-1,1)"` : ''
 
   const zone = (name, list, opacity) => `<g class="zone-${name}" fill="${COLORS[name]}" stroke="${COLORS[name]}" opacity="${opacity}">${list.join('')}</g>`
@@ -140,7 +146,8 @@ export function pcbToSvg(pcb, { side = 'top' } = {}) {
     : [zone('bottom', zoneEls.bottom, 0.25), g('bottom', els.bottom, 0.45), ...inner, zone('top', zoneEls.top, 0.55), g('top', els.top, 0.95)]
   const shape = encloses && o.shapes ? boardPath(o.shapes) : null
 
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${vb.map(f).join(' ')}" width="${(vb[2] / UNITS_PER_INCH * PX_PER_INCH).toFixed(0)}" height="${(vb[3] / UNITS_PER_INCH * PX_PER_INCH).toFixed(0)}" font-family="Arial, Helvetica, sans-serif">
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${vb.map(f).join(' ')}" width="${(vb[2] / UNITS_PER_INCH * PX_PER_INCH).toFixed(0)}" height="${(vb[3] / UNITS_PER_INCH * PX_PER_INCH).toFixed(0)}" font-family="Arial, Helvetica, sans-serif" data-outline="${outlineStatus}">
+${caption}
 <g${flip}>
 ${shape
     ? `<path d="${shape}" fill="${COLORS.board}" fill-rule="evenodd" stroke="${COLORS.edge}" stroke-width="${f(2540 * 8)}" stroke-linejoin="round"/>`
