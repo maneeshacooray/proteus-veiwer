@@ -63,6 +63,7 @@ for (const file of args) {
         for (const e of [w[0], w[w.length - 1]]) {
           ends++
           if (nodeEnds.has(e.join(','))) { endsOk++; continue }
+          if (w.net) { endsOk++; continue } // a labelled wire joins its net by name
           if (s.wires.some((v, j) => j !== wi && v.slice(1).some((q, i) => onSeg(e, v[i], q)))) endsOk++
         }
       })

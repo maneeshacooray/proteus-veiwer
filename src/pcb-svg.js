@@ -1,6 +1,6 @@
 // Draws a parsed Proteus PCB layout (see lyt.js) as SVG, viewed from the top or the bottom.
 import { placeTransform, pinStyleLookup, loosePads, thermals, UNITS_PER_INCH, TOP_SILK, BOTTOM_SILK } from './lyt.js'
-import { pathData } from './dsn.js'
+import { pathData, boxCorners } from './dsn.js'
 
 const PX_PER_INCH = 300
 const COLORS = {
@@ -57,7 +57,7 @@ export function pcbToSvg(pcb, { side = 'top' } = {}) {
         silk.push(`<line x1="${f(a[0])}" y1="${f(-a[1])}" x2="${f(b[0])}" y2="${f(-b[1])}" stroke-width="${sw}"/>`)
         grow(...a); grow(...b)
       } else if (g.type === 1) {
-        const c = [[g.x, g.y], [g.x + g.w, g.y], [g.x + g.w, g.y + g.h], [g.x, g.y + g.h]].map(T)
+        const c = boxCorners(g).map(T)
         silk.push(`<polygon points="${c.map(([x, y]) => `${f(x)},${f(-y)}`).join(' ')}" fill="none" stroke-width="${sw}"/>`)
         c.forEach((p) => grow(...p))
       } else if (g.type === 2) {
