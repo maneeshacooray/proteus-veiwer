@@ -74,9 +74,14 @@ async function openFiles(files) {
         try {
           const view = makeView('schematic')
           view.className = 'view view-schematic'
-          view.innerHTML = schematicToSvg(parseDsn(proj.dsn))
+          const sch = parseDsn(proj.dsn)
+          // no symbols decoded means a file layout this reader doesn't know: wires alone would mislead
+          if (!sch.library.size) throw new Error('No component symbols decoded')
+          view.innerHTML = schematicToSvg(sch)
           drewSchematic = true
         } catch (err) {
+          views.schematic?.remove()
+          delete views.schematic
           console.error('Could not draw schematic from .pdsprj', err)
         }
       }
@@ -86,6 +91,7 @@ async function openFiles(files) {
       if (proj.hasLayout && !gerbers.length) {
         try {
           const pcb = parseLyt(proj.lyt)
+          if (!pcb.footprints.size && !pcb.pinPads.length) throw new Error('No footprints decoded')
           for (const side of ['top', 'bottom']) {
             const view = makeView(side)
             view.innerHTML = pcbToSvg(pcb, { side })
@@ -301,6 +307,7 @@ function loadProject(proj, { haveSchematic, havePcb, native = {} }) {
       ${haveSchematic && havePcb ? '' : `
       <div class="notice">
         <b>${haveSchematic ? 'The PCB layout' : 'The schematic and PCB drawings'} can't be shown from a .pdsprj yet.</b>
+        ${+proj.meta.release >= 900 ? `This project was saved by Proteus ${escapeHtml(formatRelease(proj.meta.release))}, whose file layout this viewer can't read yet (it reads Proteus 8).` : ''}
         To see ${haveSchematic ? 'it' : 'them'} here, export from Proteus and drop the files in alongside this project:
         <ul>
           ${haveSchematic ? '' : '<li><b>Schematic:</b> Schematic Capture → File → Print (to a PDF printer), or File → Export Graphics → PDF/SVG</li>'}

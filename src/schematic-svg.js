@@ -1,18 +1,33 @@
 // Draws a parsed ISIS schematic (see dsn.js) as SVG.
-import { transform, orientVec, pathData, UNITS_PER_INCH } from './dsn.js'
+import { transform, orientVec, pathData, boxCorners, UNITS_PER_INCH } from './dsn.js'
 
 const PX_PER_INCH = 150 // CSS pixels per schematic inch at zoom 1
 const k = PX_PER_INCH / UNITS_PER_INCH
 const MIN_STROKE = 0.006 * UNITS_PER_INCH
 
 // Multi-sheet designs: each sheet is drawn on its own and the sheets are stacked top to bottom.
+/** One SVG per sheet: [{ sheet, svg }] (coordinates in mils, y down). */
+export function schematicSheets(sch) {
+  return split(sch).map(({ id, sheet }) => ({ sheet: id, svg: sheetToSvg(sheet) }))
+}
+
+/** The design cut into one object per sheet, in sheet order. */
+function split(sch) {
+  const lists = ['parts', 'wires', 'terminals', 'labels', 'graphics', 'subcircuits']
+  const ids = [...new Set(lists.flatMap((n) => (sch[n] || []).map((o) => o.sheet || 0)))].sort((a, b) => a - b)
+  return ids.map((id) => {
+    const sheet = { ...sch }
+    for (const n of lists) sheet[n] = (sch[n] || []).filter((o) => (o.sheet || 0) === id)
+    return { id, sheet }
+  })
+}
+
 export function schematicToSvg(sch) {
-  const ids = [...new Set([...sch.parts, ...sch.wires, ...sch.terminals, ...sch.labels].map((o) => o.sheet || 0))].sort((a, b) => a - b)
-  if (ids.length <= 1) return sheetToSvg(sch)
+  const split_ = split(sch)
+  if (split_.length <= 1) return sheetToSvg(sch)
   const gap = 0.6 * UNITS_PER_INCH
-  const sheets = ids.map((id) => {
-    const of = (list) => list.filter((o) => (o.sheet || 0) === id)
-    const svg = sheetToSvg({ ...sch, parts: of(sch.parts), wires: of(sch.wires), terminals: of(sch.terminals), labels: of(sch.labels) })
+  const sheets = split_.map(({ sheet }) => {
+    const svg = sheetToSvg(sheet)
     const vb = /viewBox="([^"]+)"/.exec(svg)[1].split(' ').map(Number) // mils
     return { vb, inner: svg.slice(svg.indexOf('>') + 1, svg.lastIndexOf('</svg>')) }
   }).filter((s) => s.vb.every(Number.isFinite)) // a sheet with nothing drawable has no extent
@@ -56,14 +71,26 @@ function sheetToSvg(sch) {
     if (sym) drawGraphics(sym.graphics, (p) => transform(p, t), t.rot)
   }
 
+  // sub-circuit blocks
+  for (const b of sch.subcircuits || []) {
+    out.push(`<rect class="body" x="${f(b.x1)}" y="${f(-b.y2)}" width="${f(b.x2 - b.x1)}" height="${f(b.y2 - b.y1)}" fill="#c8c8aa" fill-opacity="0.35" stroke="#000040" stroke-width="${f(0.016 * UNITS_PER_INCH)}"/>`)
+    grow(b.x1, b.y1); grow(b.x2, b.y2)
+  }
+
+  // drawings on the sheet itself (frames, notes)
+  for (const g of sch.graphics || []) {
+    if (g.type === 4 && g.text.startsWith('@')) continue // title-block field Proteus fills in when printing
+    drawGraphics([g], (p) => transform(p, g.at), g.at.rot)
+  }
+
   // wires and junction dots
   for (const w of sch.wires) {
     const pts = w.map(([x, y]) => `${f(x)},${f(-y)}`).join(' ')
-    out.push(`<polyline points="${pts}" fill="none" stroke="${w.color || '#004000'}" stroke-width="${f(Math.max(w.width || 0, MIN_STROKE))}" stroke-linejoin="round" stroke-linecap="round"/>`)
+    out.push(`<polyline class="wire" points="${pts}" fill="none" stroke="${w.color || '#004000'}" stroke-width="${f(Math.max(w.width || 0, MIN_STROKE))}" stroke-linejoin="round" stroke-linecap="round"/>`)
     w.forEach(([x, y]) => grow(x, y))
   }
   for (const [x, y] of junctions(sch.wires)) {
-    out.push(`<circle cx="${f(x)}" cy="${f(-y)}" r="${f(0.025 * UNITS_PER_INCH)}" fill="#004000"/>`)
+    out.push(`<circle class="junction" cx="${f(x)}" cy="${f(-y)}" r="${f(0.025 * UNITS_PER_INCH)}" fill="#004000"/>`)
   }
 
   // part reference / value labels and terminal labels
@@ -90,13 +117,13 @@ ${out.join('\n')}
       const stroke = g.color || '#800000'
       const sw = f(Math.max(g.width || 0, MIN_STROKE))
       const fill = g.filled ? g.fill : 'none'
-      const common = `stroke="${stroke}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round"`
+      const common = `class="body" stroke="${stroke}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round"`
       if (g.type === 0) {
         const [a, b] = g.points.map(T)
         out.push(`<line x1="${f(a[0])}" y1="${f(-a[1])}" x2="${f(b[0])}" y2="${f(-b[1])}" ${common}/>`)
         grow(...a); grow(...b)
       } else if (g.type === 1) {
-        const c = [[g.x, g.y], [g.x + g.w, g.y], [g.x + g.w, g.y + g.h], [g.x, g.y + g.h]].map(T)
+        const c = boxCorners(g).map(T)
         out.push(`<polygon points="${c.map(([x, y]) => `${f(x)},${f(-y)}`).join(' ')}" fill="${fill}" ${common}/>`)
         c.forEach((p) => grow(...p))
       } else if (g.type === 2) {
@@ -113,7 +140,7 @@ ${out.join('\n')}
         pts.forEach((p) => grow(...p))
       } else if (g.type === 4 && g.text) {
         const [x, y] = T([g.x, g.y])
-        text(g.text, x, y, g.size || 0.08 * UNITS_PER_INCH, g.just, rot, stroke)
+        text(g.text, x, y, g.size || 0.08 * UNITS_PER_INCH, g.just, rot, stroke, 'bodytext')
       }
     }
   }
@@ -128,11 +155,11 @@ ${out.join('\n')}
       for (const g of style.graphics) {
         if (g.type === 0) {
           const [a, b] = g.points.map(([x, y]) => at(x, y))
-          out.push(`<line x1="${f(a[0])}" y1="${f(-a[1])}" x2="${f(b[0])}" y2="${f(-b[1])}" stroke="${g.color || '#800000'}" stroke-width="${f(Math.max(g.width || 0, MIN_STROKE))}" stroke-linecap="round"/>`)
+          out.push(`<line class="pin" x1="${f(a[0])}" y1="${f(-a[1])}" x2="${f(b[0])}" y2="${f(-b[1])}" stroke="${g.color || '#800000'}" stroke-width="${f(Math.max(g.width || 0, MIN_STROKE))}" stroke-linecap="round"/>`)
           grow(...a); grow(...b)
         } else if (g.type === 2) {
           const [cx, cy] = at(g.cx, g.cy)
-          out.push(`<circle cx="${f(cx)}" cy="${f(-cy)}" r="${f(Math.abs(g.r))}" fill="none" stroke="${g.color || '#800000'}" stroke-width="${f(MIN_STROKE)}"/>`)
+          out.push(`<circle class="pin" cx="${f(cx)}" cy="${f(-cy)}" r="${f(Math.abs(g.r))}" fill="none" stroke="${g.color || '#800000'}" stroke-width="${f(MIN_STROKE)}"/>`)
         }
       }
     }
@@ -165,17 +192,17 @@ ${out.join('\n')}
     const over = ''
     const rot = vertical ? ` transform="rotate(-90 ${f(x)} ${f(-y)})"` : ''
     if (vertical) { anchor = kind === 'num' ? 'middle' : dy < 0 ? 'start' : 'end' }
-    out.push(`<text x="${f(x)}" y="${f(-y)}" font-size="${f(size)}" text-anchor="${anchor}" dominant-baseline="${baseline}" fill="#000"${over}${rot}>${esc(label)}</text>`)
+    out.push(`<text class="pintext" x="${f(x)}" y="${f(-y)}" font-size="${f(size)}" text-anchor="${anchor}" dominant-baseline="${baseline}" fill="#000"${over}${rot}>${esc(label)}</text>`)
   }
 
-  function text(s, x, y, size, just = 0x31, rot = 0, color = '#000') {
+  function text(s, x, y, size, just = 0x31, rot = 0, color = '#000', cls = 'label') {
     // Low bits: 1 = top, 2 = bottom, 4 = middle (vertical); high nibble 3 = left aligned.
     const v = just & 0x07
     const baseline = v & 2 ? 'auto' : v & 4 ? 'central' : 'hanging'
     const h = just >> 4
     const anchor = h === 3 ? 'start' : h === 2 ? 'middle' : h === 1 ? 'end' : 'start'
     const r = rot === 90 || rot === 270 ? ` transform="rotate(-90 ${f(x)} ${f(-y)})"` : ''
-    out.push(`<text x="${f(x)}" y="${f(-y)}" font-size="${f(size)}" text-anchor="${anchor}" dominant-baseline="${baseline}" fill="${color}"${r}>${esc(s)}</text>`)
+    out.push(`<text class="${cls}" x="${f(x)}" y="${f(-y)}" font-size="${f(size)}" text-anchor="${anchor}" dominant-baseline="${baseline}" fill="${color}"${r}>${esc(s)}</text>`)
     grow(x, y)
   }
 

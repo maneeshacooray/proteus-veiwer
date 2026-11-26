@@ -17,7 +17,7 @@
 //     board graphics [03][u32 layer][x][y][u32 rotation][graphics record relative to x,y]
 //       (layer 28 board edge, 16 top silk, 17 bottom silk).
 
-import { trailingString } from './dsn.js'
+import { trailingString, boxCorners } from './dsn.js'
 const dec = new TextDecoder('windows-1252')
 export const UNITS_PER_INCH = 2540000
 const TOP_COPPER = 0x00
@@ -98,7 +98,7 @@ export function parseLyt(bytes) {
     const rec = { type, len, layer: u32(o + 10), width: i32(sb + 1) }
     const pts = (n) => Array.from({ length: n }, (_, k) => [i32(body + 8 * k), i32(body + 8 * k + 4)])
     if (type === 0) rec.points = pts(2)
-    else if (type === 1) { rec.x = i32(body); rec.y = i32(body + 4); rec.w = i32(body + 12); rec.h = i32(body + 16) }
+    else if (type === 1) { rec.x = i32(body); rec.y = i32(body + 4); rec.angle = (((u32(body + 8) & 0xffff) << 16) >> 16) / 10; rec.w = i32(body + 12); rec.h = i32(body + 16) }
     else if (type === 2) { rec.cx = i32(body); rec.cy = i32(body + 4); rec.r = i32(body + 8) }
     else if (type === 3) rec.points = pts(4)
     else if (type === 4) { rec.x = i32(body); rec.y = i32(body + 4); rec.size = i32(body + 16); rec.text = trailingString(d, body, o + len) }
@@ -284,7 +284,7 @@ export function parseLyt(bytes) {
       const T = ([x, y]) => [Math.round(ox + x * c - y * sn), Math.round(oy + x * sn + y * c)]
       const g = { layer, type: r.type, width: r.width }
       if (r.type === 0 || r.type === 3 || r.type === 7) { g.points = r.points.map(T); if (r.kinds) g.kinds = r.kinds }
-      else if (r.type === 1) g.points = [[r.x, r.y], [r.x + r.w, r.y], [r.x + r.w, r.y + r.h], [r.x, r.y + r.h]].map(T)
+      else if (r.type === 1) g.points = boxCorners(r).map(T)
       else if (r.type === 2) { [g.cx, g.cy] = T([r.cx, r.cy]); g.r = Math.abs(r.r) }
       else if (r.type === 4) { [g.x, g.y] = T([r.x, r.y]); g.size = r.size; g.text = r.text; g.rot = rot / 10 }
       else continue

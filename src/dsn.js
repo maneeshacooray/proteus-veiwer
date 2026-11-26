@@ -11,7 +11,7 @@
 //   Graphics record: u32 length, u32 ?, u8 type, u8 2, style block, 0x02, flags,
 //     style name\0, then type-specific data:
 //       0 line   x1 y1 x2 y2
-//       1 box    x y ? w h
+//       1 box    x y, i16 rotation about (x, y) in 0.1° + u16 flags, w h
 //       2 circle cx cy r
 //       3 arc    cubic Bézier, 4 points
 //       4 text   x y …, string at the end
@@ -22,7 +22,11 @@
 //
 //   "ISIS CIRCUIT FILE" / "OBJECT DATA": the sheet.
 //     Component: u16 pin count, pstr device (= library symbol), x, y, u32 rotation (0.1°)
-//     Wire: style block, "WIRE\0", 00 00, u16 point count, points
+//     Sub-circuit: 0x05, box x1 y1 x2 y2, u16, 0xff + pstr reference; ports are $SCP… terminals.
+//     Sheet drawing: 0x20, x, y, i16 rot, u16 mirror, then a graphics record styled "2D GRAPHIC".
+//     Bus: as a wire, styled "BUS WIRE".
+//     Wire: style block, "WIRE\0", 00 00, u16 point count, points. A net label on a wire is a label
+//       record (style "WIRE LABEL") followed by the wire: 4 bytes, u16 point count, points
 //     Terminal: x, y, u32 rotation, pstr "$TER…" (library symbol)
 //     Label: 0xff, pstr text, x, y, …, "Default Font\0", style ("COMPONENT ID", …)
 
@@ -78,7 +82,7 @@ export function parseDsn(bytes) {
     const pts = (n) => Array.from({ length: n }, (_, k) => [i32(body + 8 * k), i32(body + 8 * k + 4)])
     switch (type) {
       case 0: rec.points = pts(2); break
-      case 1: rec.x = i32(body); rec.y = i32(body + 4); rec.w = i32(body + 12); rec.h = i32(body + 16); break
+      case 1: rec.x = i32(body); rec.y = i32(body + 4); rec.angle = i16(body + 8) / 10; rec.w = i32(body + 12); rec.h = i32(body + 16); break
       case 2: rec.cx = i32(body); rec.cy = i32(body + 4); rec.r = i32(body + 8); break
       case 3: rec.points = pts(4); break
       case 7: { // path: n, bbox, u16, n points, then (kind, flag) per point
@@ -164,6 +168,7 @@ export function parseDsn(bytes) {
   const terminals = []
   const labels = []
   const wireTag = enc('WIRE\0')
+  const busTag = enc('BUS WIRE\0') // a bus: same record, thicker and blue
   // a design can have several sheets, each starting with its own "ISIS CIRCUIT FILE"
   const sheetStarts = []
   for (let q = sheetStart; q >= 0; q = indexOf(d, enc('ISIS CIRCUIT FILE'), q + 1)) sheetStarts.push(q)
@@ -171,16 +176,19 @@ export function parseDsn(bytes) {
 
   for (let p = sheetStart; p < d.length - 8; p++) {
     // wires
-    if (d[p] === 0x57 && match(d, p, wireTag) && d[p - 2] === 0x02) {
-      const n = u16(p + 7)
+    const tag = d[p - 2] !== 0x02 ? 0 : d[p] === 0x57 && match(d, p, wireTag) ? wireTag.length : d[p] === 0x42 && match(d, p, busTag) ? busTag.length : 0
+    if (tag) {
+      const at = p + tag + 2 // after the style name: 00 00, u16 point count, points
+      const n = u16(at)
       if (n >= 2 && n < 1000) {
         const pts = []
-        for (let k = 0; k < n; k++) pts.push([i32(p + 9 + 8 * k), i32(p + 13 + 8 * k)])
+        for (let k = 0; k < n; k++) pts.push([i32(at + 2 + 8 * k), i32(at + 6 + 8 * k)])
         pts.color = colorref(d, p - 2 - 13)
         pts.width = i32(p - 2 - 17)
         pts.sheet = sheetOf(p)
+        if (tag === busTag.length) pts.bus = true
         wires.push(pts)
-        p += 9 + 8 * n - 1
+        p = at + 2 + 8 * n - 1
         continue
       }
     }
@@ -199,8 +207,8 @@ export function parseDsn(bytes) {
           p = o + 11
           continue
         }
-        if (name.startsWith('$TER') && p >= 12) {
-          terminals.push({ symbol: name, x: i32(p - 12), y: i32(p - 8), rot: rotOf(i16(p - 4)), sheet: sheetOf(p) })
+        if ((name.startsWith('$TER') || name.startsWith('$SCP')) && p >= 12) { // terminals and sub-circuit ports
+          terminals.push({ symbol: name, x: i32(p - 12), y: i32(p - 8), rot: rotOf(i16(p - 4)), mirror: u16(p - 2), sheet: sheetOf(p) })
           p += L
           continue
         }
@@ -224,8 +232,49 @@ export function parseDsn(bytes) {
             just: j.just, size: j.size || 254000, sheet: sheetOf(p),
           })
           p = e
+          // a net label on a wire is followed by that wire: 4 bytes, u16 point count, points
+          if (style === 'WIRE LABEL') {
+            const n = u16(e + 5)
+            const pts = []
+            if (n >= 2 && n < 1000 && e + 7 + 8 * n <= d.length) for (let k = 0; k < n; k++) pts.push([i32(e + 7 + 8 * k), i32(e + 11 + 8 * k)])
+            if (pts.length && pts.every(([x, y]) => Math.abs(x) < 60 * 2540000 && Math.abs(y) < 60 * 2540000)) {
+              pts.sheet = sheetOf(p)
+              pts.net = text // joined to the rest of its net by name, so a free end is fine
+              wires.push(pts)
+              p = e + 7 + 8 * n - 1
+            }
+          }
         }
       }
+    }
+  }
+
+  // Sheet drawings (lines, boxes, circles, text drawn on the sheet itself, outside any part): ordinary
+  // graphics records whose style is "2D GRAPHIC", each behind a 13-byte placement: 0x20, x, y, i16 rot,
+  // u16 mirror. The record's own coordinates are relative to that placement.
+  const graphics = []
+  const g2d = enc('2D GRAPHIC\0')
+  for (let q = indexOf(d, g2d, sheetStart); q >= 0; q = indexOf(d, g2d, q + 1)) {
+    if (d[q - 2] !== 0x02) continue
+    for (let o = q - 14; o >= q - 48; o--) {
+      const r = u32(o) >= 40 && u32(o) <= 4096 && d[o + 9] === 2 && o + u32(o) > q ? readRecord(o, d.length) : null
+      if (r && r.style === '2D GRAPHIC') { r.sheet = sheetOf(o); r.at = { x: i32(o - 12), y: i32(o - 8), rot: rotOf(i16(o - 4)), mirror: u16(o - 2) }; graphics.push(r); break }
+    }
+  }
+
+  // Sub-circuit blocks: 0x05, box corners x1 y1 x2 y2, u16, 0xff + pstr reference, then its "SUBCKT ID" label.
+  // Their ports are $SCP… terminals, picked up with the other terminals above.
+  const subcircuits = []
+  const sid = enc('SUBCKT ID\0')
+  for (let q = indexOf(d, sid, sheetStart); q >= 0; q = indexOf(d, sid, q + 1)) {
+    for (let o = q - 30; o >= Math.max(sheetStart, q - 160); o--) {
+      if (d[o] !== 0x05 || d[o + 19] !== 0xff) continue
+      const n = d[o + 20], name = tryStr(d, o + 21, n)
+      if (!name || o + 21 + n > q) continue
+      const [x1, y1, x2, y2] = [1, 5, 9, 13].map((k) => i32(o + k))
+      if (!(x2 > x1 && y2 > y1 && x2 - x1 < 40 * 2540000 && y2 - y1 < 40 * 2540000)) continue
+      if (!subcircuits.some((b) => b.x1 === x1 && b.y1 === y1 && b.sheet === sheetOf(o))) subcircuits.push({ name, x1, y1, x2, y2, sheet: sheetOf(o) })
+      break
     }
   }
 
@@ -238,7 +287,7 @@ export function parseDsn(bytes) {
     if (!pinouts.has(m[1])) pinouts.set(m[1], map)
   }
 
-  return { library, parts, wires, terminals, labels, pinouts }
+  return { library, parts, wires, terminals, labels, graphics, subcircuits, pinouts }
 
   function findJust(d, from, to) {
     for (let q = from; q < to - 8; q++) {
@@ -318,6 +367,12 @@ export function orientVec(pin, x, y) {
 }
 
 // SVG path data for a type-7 path record (kind per point: 0 move, 1 line, 2 Bézier in groups of 3)
+/** Corners of a box record (rotated about its x, y corner by its own angle). */
+export function boxCorners(g) {
+  const a = ((g.angle || 0) * Math.PI) / 180, c = Math.cos(a), s = Math.sin(a)
+  return [[0, 0], [g.w, 0], [g.w, g.h], [0, g.h]].map(([u, v]) => [g.x + u * c - v * s, g.y + u * s + v * c])
+}
+
 export function pathData(points, kinds, fmt) {
   let dd = ''
   for (let i = 0; i < points.length; i++) {
