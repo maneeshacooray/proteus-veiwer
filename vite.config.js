@@ -1,0 +1,9 @@
+import { defineConfig } from 'vite'
+import { viteSingleFile } from 'vite-plugin-singlefile'
+
+export default defineConfig({
+  base: './',
+  plugins: [viteSingleFile()],
+  worker: { format: 'es' },
+  build: { target: 'es2022' },
+})

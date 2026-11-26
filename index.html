@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Proteus Viewer</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <header>
+      <strong class="brand">Proteus Viewer</strong>
+      <nav id="tabs">
+        <button data-view="project">Project</button>
+        <button data-view="schematic" class="active">Schematic</button>
+        <button data-view="top">PCB Top</button>
+        <button data-view="bottom">PCB Bottom</button>
+        <button data-view="layers">Layers</button>
+      </nav>
+      <label class="open-btn">
+        Open files…
+        <input id="file-input" type="file" multiple hidden
+          accept=".pdsprj,.zip,.pdf,.svg,.png,.jpg,.jpeg,.gbr,.ger,.drl,.txt,.cmp,.sol,.gtl,.gbl,.gto,.gbo,.gts,.gbs,.gtp,.gbp,.gko,.gm1,.xln,.exc" />
+      </label>
+    </header>
+
+    <main id="stage">
+      <div id="viewport">
+        <div id="canvas"></div>
+      </div>
+
+      <div id="project-view" class="view" hidden></div>
+
+      <aside id="layer-panel" hidden>
+        <h3>Layers</h3>
+        <ul id="layer-list"></ul>
+      </aside>
+
+      <div id="empty">
+        <div class="drop-card">
+          <h2>Drop your Proteus exports here</h2>
+          <p>A <b>.zip</b> or loose files, in any combination:</p>
+          <ul>
+            <li><b>Proteus project</b>: .pdsprj<br /><small>Shows project info, parts list and board layers</small></li>
+            <li><b>Schematic</b>: PDF, SVG or PNG<br /><small>Proteus schematic → File → Print / Export Graphics</small></li>
+            <li><b>PCB</b>: Gerber + drill files<br /><small>Proteus PCB Layout → Output → Generate Gerber/Excellon Files</small></li>
+          </ul>
+          <p class="hint">Files stay on your computer. Nothing is uploaded.</p>
+        </div>
+      </div>
+
+      <div id="status" hidden></div>
+      <div id="zoom-controls">
+        <button data-zoom="in" title="Zoom in">+</button>
+        <button data-zoom="out" title="Zoom out">−</button>
+        <button data-zoom="fit" title="Fit to screen">Fit</button>
+      </div>
+    </main>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
