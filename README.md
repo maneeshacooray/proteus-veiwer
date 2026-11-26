@@ -47,7 +47,7 @@ Checked against Proteus's own exports from public GitHub projects (`tools/compar
 
 Boards and schematics whose exports predate later edits were excluded. `compare-sch` lines the PDF up with the drawing by voting over offsets at Proteus's 1:1 print scale, then scores both directions; `--details` names the PDF elements we miss most.
 
-**Limits:** pours are drawn as Proteus last filled them (it refills on export), boards with nothing on the board-edge layer (and very old files) get an outline estimated from the parts, and some per-pin pad rotations are approximate. On schematics, the title-block template and fields (`@DTITLE`, `@PAGE`…) that Proteus fills in when printing aren't drawn, nor are simulation logic-state markers. Files saved by Proteus 9 use a new layout that isn't decoded yet; the viewer says so and asks for exports instead. Exported PDFs/Gerbers take precedence when dropped alongside a `.pdsprj`.
+**Limits:** pours are drawn as Proteus last filled them (it refills on export), boards with nothing on the board-edge layer (and very old files) get an outline estimated from the parts (when a board edge exists but copper lies outside it, the edge is drawn as is and those items are outlined in red), and some per-pin pad rotations are approximate. On schematics, the title-block template and fields (`@DTITLE`, `@PAGE`…) that Proteus fills in when printing aren't drawn, nor are simulation logic-state markers. Files saved by Proteus 9 use a new layout that isn't decoded yet; the viewer says so and asks for exports instead. Exported PDFs/Gerbers take precedence when dropped alongside a `.pdsprj`.
 
 ## Tech
 

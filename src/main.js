@@ -88,6 +88,7 @@ async function openFiles(files) {
       // Same for the PCB, unless Gerbers were dropped too.
       let drewPcb = false
       let outline = null
+      let outsideItems = ''
       if (proj.hasLayout && !gerbers.length) {
         try {
           const pcb = parseLyt(proj.lyt)
@@ -96,6 +97,7 @@ async function openFiles(files) {
             const view = makeView(side)
             view.innerHTML = pcbToSvg(pcb, { side })
             outline = view.querySelector('svg')?.dataset.outline || outline
+            outsideItems = view.querySelector('svg')?.dataset.outside || outsideItems
           }
           views.layers?.remove()
           delete views.layers
@@ -107,7 +109,7 @@ async function openFiles(files) {
       loadProject(proj, {
         haveSchematic: drewSchematic || schematic.length > 0,
         havePcb: drewPcb || gerbers.length > 0,
-        native: { schematic: drewSchematic, pcb: drewPcb, outline },
+        native: { schematic: drewSchematic, pcb: drewPcb, outline, outsideItems },
       })
       notes.push(projects[0].name)
     }
@@ -300,9 +302,12 @@ function loadProject(proj, { haveSchematic, havePcb, native = {} }) {
       </div>` : ''}
       ${native.pcb && native.outline && native.outline !== 'edge' ? `
       <div class="notice">
-        <b>${native.outline === 'none' ? 'This design has no board edge.' : "This design's board edge doesn't contain the parts."}</b>
-        ${native.outline === 'none' ? 'Nothing is drawn on the Board Edge layer in Proteus, so' : 'So'} the dashed outline in the PCB views is
-        estimated from the parts and isn't the real board shape. Draw the outline on the Board Edge layer in Proteus to fix this.
+        ${native.outline === 'none' ? `<b>This design has no board edge.</b>
+        Nothing is drawn on the Board Edge layer in Proteus, so the dashed outline in the PCB views is
+        estimated from the parts and isn't the real board shape. Draw the outline on the Board Edge layer in Proteus to fix this.` : `
+        <b>Some of this design lies outside its board edge.</b>
+        Outside the edge: ${escapeHtml(native.outsideItems || 'copper')}. The PCB views draw the board edge as Proteus has it and
+        outline these items in red (hover one to see what it is). Move them onto the board, or redraw the Board Edge layer to take them in.`}
       </div>` : ''}
       ${haveSchematic && havePcb ? '' : `
       <div class="notice">
