@@ -16,6 +16,7 @@
 //       3 arc    cubic Bézier, 4 points
 //       4 text   x y …, string at the end
 //       6/8      marker (symbol origin, pin node, label anchors)
+//       7 path   n, bbox, u16, n points, then (kind, flag) per point: 0 move, 1 line, 2 Bézier ×3
 //   Pin record: 4 flag bytes, x, y, u16 rotation (0.1°), u16 mirror, style\0, name\0, number\0
 //     (the pin-style symbol is mirrored in X first, then rotated)
 //
@@ -47,7 +48,8 @@ export function parseDsn(bytes) {
     const len = u32(o)
     const len2 = u32(o + 4)
     const type = d[o + 8]
-    if (len < 40 || len > 4096 || len2 > len || o + len > end || d[o + 9] !== 2 || type > 15) return null
+    if (len < 40 || len > 4096 || o + len > end || d[o + 9] !== 2 || type > 15) return null
+    if (len2 > len && type !== 6 && type !== 8) return null // markers can carry len2 > len
     if (type === 6 || type === 8) {
       // marker: x, y at +16/+20, then its "$MKR…" name
       const m = indexOf(d, [0x24], o + 24, o + len)
@@ -79,6 +81,13 @@ export function parseDsn(bytes) {
       case 1: rec.x = i32(body); rec.y = i32(body + 4); rec.w = i32(body + 12); rec.h = i32(body + 16); break
       case 2: rec.cx = i32(body); rec.cy = i32(body + 4); rec.r = i32(body + 8); break
       case 3: rec.points = pts(4); break
+      case 7: { // path: n, bbox, u16, n points, then (kind, flag) per point
+        const n = u32(body)
+        if (n < 2 || n > 2000 || body + 22 + 10 * n > o + len) return null
+        rec.points = Array.from({ length: n }, (_, k) => [i32(body + 22 + 8 * k), i32(body + 26 + 8 * k)])
+        rec.kinds = Array.from({ length: n }, (_, k) => d[body + 22 + 8 * n + 2 * k])
+        break
+      }
       case 4: {
         rec.x = i32(body); rec.y = i32(body + 4)
         rec.just = d[body + 10]
@@ -155,6 +164,10 @@ export function parseDsn(bytes) {
   const terminals = []
   const labels = []
   const wireTag = enc('WIRE\0')
+  // a design can have several sheets, each starting with its own "ISIS CIRCUIT FILE"
+  const sheetStarts = []
+  for (let q = sheetStart; q >= 0; q = indexOf(d, enc('ISIS CIRCUIT FILE'), q + 1)) sheetStarts.push(q)
+  const sheetOf = (q) => { let k = 0; while (k + 1 < sheetStarts.length && sheetStarts[k + 1] <= q) k++; return k }
 
   for (let p = sheetStart; p < d.length - 8; p++) {
     // wires
@@ -165,6 +178,7 @@ export function parseDsn(bytes) {
         for (let k = 0; k < n; k++) pts.push([i32(p + 9 + 8 * k), i32(p + 13 + 8 * k)])
         pts.color = colorref(d, p - 2 - 13)
         pts.width = i32(p - 2 - 17)
+        pts.sheet = sheetOf(p)
         wires.push(pts)
         p += 9 + 8 * n - 1
         continue
@@ -181,12 +195,12 @@ export function parseDsn(bytes) {
           // the part's properties text (with its PACKAGE) sits just before the instance record
           const props = dec.decode(d.subarray(Math.max(sheetStart, p - 800), p))
           const pkg = [...props.matchAll(/\{PACKAGE=([^}]+)\}/g)].pop()?.[1]
-          parts.push({ device: name, x: i32(o), y: i32(o + 4), rot: rotOf(i16(o + 8)), mirror: u16(o + 10), package: pkg })
+          parts.push({ device: name, x: i32(o), y: i32(o + 4), rot: rotOf(i16(o + 8)), mirror: u16(o + 10), package: pkg, sheet: sheetOf(p) })
           p = o + 11
           continue
         }
         if (name.startsWith('$TER') && p >= 12) {
-          terminals.push({ symbol: name, x: i32(p - 12), y: i32(p - 8), rot: rotOf(i16(p - 4)) })
+          terminals.push({ symbol: name, x: i32(p - 12), y: i32(p - 8), rot: rotOf(i16(p - 4)), sheet: sheetOf(p) })
           p += L
           continue
         }
@@ -207,7 +221,7 @@ export function parseDsn(bytes) {
           const j = findJust(d, o + 12, font)
           labels.push({
             text, style, x: i32(o), y: i32(o + 4), rot: rotOf(i16(o + 8)),
-            just: j.just, size: j.size || 254000,
+            just: j.just, size: j.size || 254000, sheet: sheetOf(p),
           })
           p = e
         }
@@ -301,4 +315,18 @@ export function orientVec(pin, x, y) {
   const r = ((pin.rot || 0) * Math.PI) / 180
   const c = Math.round(Math.cos(r)), s = Math.round(Math.sin(r))
   return [x * c - y * s, x * s + y * c]
+}
+
+// SVG path data for a type-7 path record (kind per point: 0 move, 1 line, 2 Bézier in groups of 3)
+export function pathData(points, kinds, fmt) {
+  let dd = ''
+  for (let i = 0; i < points.length; i++) {
+    const [x, y] = points[i]
+    if (kinds[i] === 2 && i + 2 < points.length) {
+      const [b, c] = [points[i + 1], points[i + 2]]
+      dd += `C${fmt(x)},${fmt(-y)} ${fmt(b[0])},${fmt(-b[1])} ${fmt(c[0])},${fmt(-c[1])} `
+      i += 2
+    } else dd += `${i === 0 || kinds[i] === 0 ? 'M' : 'L'}${fmt(x)},${fmt(-y)} `
+  }
+  return dd.trim()
 }
